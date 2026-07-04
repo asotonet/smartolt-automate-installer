@@ -1,0 +1,167 @@
+# SmartOLT Automate installer — docker-compose template.
+#
+# This file ships with the public installer repo and references prebuilt
+# images from Docker Hub. No source code from the main project is included.
+# To build images from source, see the upstream repo:
+#   https://github.com/<owner>/smartolt-automate
+#
+# All values come from .env or are referenced via ${VAR} syntax.
+
+services:
+  smartolt-automate:
+    image: ${SMARTOLT_IMAGE:-asoton/smartolt-automate:v0.2.0}
+    pull_policy: ${PULL_POLICY:-always}
+    container_name: smartolt-automate
+    restart: unless-stopped
+    environment:
+      SMARTOLT_BASE_URL: "${SMARTOLT_BASE_URL:?Set SMARTOLT_BASE_URL in .env}"
+      SMARTOLT_API_KEY: "${SMARTOLT_API_KEY:?Set SMARTOLT_API_KEY in .env}"
+      OLTS_CONFIG_JSON: "${OLTS_CONFIG_JSON:-}"
+      TZ: "${TZ:-America/Bogota}"
+      SCHEDULER_TIMEZONE: "${SCHEDULER_TIMEZONE:-America/Bogota}"
+      SCHEDULER_HOUR_START: "${SCHEDULER_HOUR_START:-2}"
+      SCHEDULER_HOUR_END: "${SCHEDULER_HOUR_END:-3}"
+      BATCH_INITIAL_CONCURRENCY: "${BATCH_INITIAL_CONCURRENCY:-1}"
+      BATCH_MAX_CONCURRENCY: "${BATCH_MAX_CONCURRENCY:-3}"
+      BATCH_COOLDOWN_MS: "${BATCH_COOLDOWN_MS:-500}"
+      BATCH_ERROR_THRESHOLD: "${BATCH_ERROR_THRESHOLD:-0.02}"
+      OLT_STARTUP_STAGGER_SECONDS: "${OLT_STARTUP_STAGGER_SECONDS:-15}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+      LOG_JSON: "${LOG_JSON:-false}"
+      LOG_DIR: "${LOG_DIR:-/app/logs}"
+      LOG_FILE_PREFIX: "${LOG_FILE_PREFIX:-smartolt-automate}"
+      STATE_DIR: "${STATE_DIR:-/app/state}"
+      OLTS_CONFIG_PATH: "${OLTS_CONFIG_PATH:-/app/configs/olts.yaml}"
+    volumes:
+      - logs:/app/logs
+      - state:/app/state
+      - data:/app/data
+      - ./configs:/app/configs
+    ports:
+      - "${HEALTH_PORT:-8080}:8080"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request, sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3).status == 200 else 1)
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  web:
+    image: ${SMARTOLT_IMAGE:-asoton/smartolt-automate:v0.2.0}
+    pull_policy: ${PULL_POLICY:-always}
+    container_name: smartolt-automate-web
+    restart: unless-stopped
+    entrypoint: ["uvicorn"]
+    command: ["smartolt_automate.web.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      SMARTOLT_BASE_URL: "${SMARTOLT_BASE_URL:?Set SMARTOLT_BASE_URL in .env}"
+      SMARTOLT_API_KEY: "${SMARTOLT_API_KEY:?Set SMARTOLT_API_KEY in .env}"
+      INITIAL_ADMIN_USERNAME: "${INITIAL_ADMIN_USERNAME:?Set INITIAL_ADMIN_USERNAME in .env}"
+      INITIAL_ADMIN_PASSWORD: "${INITIAL_ADMIN_PASSWORD:?Set INITIAL_ADMIN_PASSWORD in .env}"
+      TZ: "${TZ:-America/Bogota}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+      LOG_JSON: "${LOG_JSON:-false}"
+      LOG_DIR: "${LOG_DIR:-/app/logs}"
+      LOG_FILE_PREFIX: "${LOG_FILE_PREFIX:-smartolt-automate}"
+      STATE_DIR: "${STATE_DIR:-/app/state}"
+      OLTS_CONFIG_PATH: "${OLTS_CONFIG_PATH:-/app/configs/olts.yaml}"
+      WEB_INTERNAL_BASE_URL: "http://smartolt-automate:8080"
+      WEB_CORS_ORIGINS: "${WEB_CORS_ORIGINS:-http://localhost:5173,http://localhost}"
+      WEB_DB_PATH: "/app/data/users.db"
+      PROXY_HTTP_PORT: "${PROXY_HTTP_PORT:-80}"
+      PROXY_HTTPS_PORT: "${PROXY_HTTPS_PORT:-443}"
+      COMPOSE_PROJECT_NAME: "${COMPOSE_PROJECT_NAME:-smartolt_api_automate}"
+      PROXY_SERVICE_NAME: "${PROXY_SERVICE_NAME:-${COMPOSE_PROJECT_NAME:-smartolt_api_automate}-proxy}"
+      CERTBOT_SERVICE_NAME: "${CERTBOT_SERVICE_NAME:-${COMPOSE_PROJECT_NAME:-smartolt_api_automate}-certbot}"
+    volumes:
+      - logs:/app/logs:ro
+      - state:/app/state:ro
+      - data:/app/data
+      - ./configs:/app/configs
+      # Mount docker socket so the web tier can `docker compose exec` into
+      # the certbot/proxy containers for cert issuance and config reload.
+      # This is the only way to drive certbot without exposing a custom
+      # control port from those containers. Restrict in production.
+      - /var/run/docker.sock:/var/run/docker.sock
+    expose:
+      - "8000"
+    depends_on:
+      smartolt-automate:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/service/livez', timeout=3).status == 200 else 1)\""
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  frontend:
+    image: ${SMARTOLT_FRONTEND_IMAGE:-asoton/smartolt-automate-frontend:v0.2.0}
+    pull_policy: ${PULL_POLICY:-always}
+    container_name: smartolt-automate-frontend
+    restart: unless-stopped
+    expose:
+      - "80"
+    depends_on:
+      web:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  proxy:
+    image: ${PROXY_IMAGE:-asoton/smartolt-automate-proxy:v0.2.0}
+    pull_policy: ${PULL_POLICY:-always}
+    container_name: smartolt-automate-proxy
+    restart: unless-stopped
+    volumes:
+      - proxy_caddy:/etc/caddy
+      - certbot_etc:/etc/letsencrypt:ro
+      - certbot_work:/var/lib/letsencrypt:ro
+      - certbot_logs:/var/log/letsencrypt:ro
+    ports:
+      - "${PROXY_HTTP_PORT:-80}:80"
+      - "${PROXY_HTTPS_PORT:-443}:443"
+    depends_on:
+      - frontend
+      - web
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- --spider http://127.0.0.1:80/ >/dev/null 2>&1 || exit 0"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  certbot:
+    image: ${CERTBOT_IMAGE:-asoton/smartolt-automate-certbot:v0.2.0}
+    pull_policy: ${PULL_POLICY:-always}
+    container_name: smartolt-automate-certbot
+    restart: unless-stopped
+    environment:
+      GLOBAL_CONFIG_PATH: /app/configs/global.yaml
+    volumes:
+      - certbot_etc:/etc/letsencrypt
+      - certbot_work:/var/lib/letsencrypt
+      - certbot_logs:/var/log/letsencrypt
+      - ./configs:/app/configs:ro
+    # No ports. certbot only does DNS-01 (outbound) so it doesn't need
+    # :80 or :443 — and doesn't need a webroot volume either.
+    entrypoint: ["sleep", "infinity"]
+
+volumes:
+  logs:
+  state:
+  data:
+  proxy_caddy:
+  certbot_etc:
+  certbot_work:
+  certbot_logs:

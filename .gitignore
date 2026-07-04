@@ -1,0 +1,18 @@
+# Local env file (contains the SmartOLT API key)
+.env
+
+# Persistent runtime data
+data/
+logs/
+state/
+
+# Local OLT config (may contain per-tenant overrides)
+configs/olts.yaml
+configs/olts.json
+configs/global.yaml
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

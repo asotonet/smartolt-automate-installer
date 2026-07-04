@@ -1,0 +1,17 @@
+# Sample OLT list — the wizard copies this to configs/olts.yaml on first run.
+#
+# Each entry corresponds to one OLT as reported by SmartOLT's /api/system/get_olts.
+# `id` is the SmartOLT-side OLT identifier (integer, as a string).
+#
+# Edit this file (or use the panel) to enable/disable each OLT, restrict
+# reboots to online-only ONUs, or limit which nights the automated window runs.
+
+olts: []
+  # - id: "1"
+  #   name: "OLT-Norte-01"
+  #   enabled: true
+  #   reboot_only_online: true
+  #   restart_nights:
+  #     - mon
+  #     - wed
+  #     - fri
