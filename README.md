@@ -1,6 +1,6 @@
 # SmartOLT Automate Installer
 
-One-command installer for [SmartOLT Automate](https://github.com/<owner>/smartolt-automate): a guided wizard that pulls prebuilt Docker images from Docker Hub, generates `.env`, and brings the full 5-service stack online — including the optional reverse proxy and HTTPS (Caddy + certbot with DNS-01).
+One-command installer for [SmartOLT Automate](https://github.com/asotonet/smartolt-automate): a guided wizard that pulls prebuilt Docker images from Docker Hub, generates `.env`, and brings the full 5-service stack online — including the optional reverse proxy and HTTPS (Caddy + certbot with DNS-01).
 
 This repository is **public** and contains no application source code. The full source lives in the upstream project; the images you pull are signed and pinned to specific versions.
 
@@ -17,13 +17,10 @@ This repository is **public** and contains no application source code. The full 
 
 ```bash
 # Run the wizard (no clone required):
-curl -fsSL https://raw.githubusercontent.com/<owner>/smartolt-automate-installer/main/scripts/install.sh | bash
-```
+curl -fsSL https://raw.githubusercontent.com/asotonet/smartolt-automate-installer/main/scripts/install.sh | bash
 
-Or, if you prefer to clone first:
-
-```bash
-git clone https://github.com/<owner>/smartolt-automate-installer
+# Or, if you prefer to clone first:
+git clone https://github.com/asotonet/smartolt-automate-installer
 cd smartolt-automate-installer
 ./scripts/install.sh
 ```
@@ -119,7 +116,7 @@ To keep persistent data, drop the `--volumes` flag.
 
 ## Related
 
-- **Upstream project**: <https://github.com/<owner>/smartolt-automate> — full source, CI, release pipeline.
+- **Upstream project**: <https://github.com/asotonet/smartolt-automate> — full source, CI, release pipeline.
 - **SmartOLT API docs**: <https://smartolt.com/api-docs> (login required).
 
 ## License
