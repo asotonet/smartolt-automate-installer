@@ -2,234 +2,342 @@
 # Detect new versions of SmartOLT Automate and offer to upgrade.
 #
 # Strategy:
-# - Read the currently-installed tag from .env (SMARTOLT_IMAGE, etc.)
-# - List all semver tags on Docker Hub (asoton/smartolt-automate)
-# - Pick the highest one that isn't a prerelease unless --pre is set
-# - If newer than what's installed, show a diff and offer to upgrade
-# - 'apply': update .env, pull, and re-create the stack
+# - Read the currently-installed tag from .env (SMARTOLT_IMAGE, etc.).
+# - List all semver tags on Docker Hub (asoton/smartolt-automate).
+# - Pick the highest stable one (or --pre / explicit tag).
+# - --check: show what would happen and exit.
+# - --apply: update .env, pull, and re-create the smartolt-automate + web
+#   containers. data/, logs/, configs/ are untouched.
 #
 # Usage:
 #   scripts/upgrade.sh            # check + prompt
 #   scripts/upgrade.sh --check    # check only, no changes
-#   scripts/upgrade.sh --apply    # non-interactive: apply the latest
-#   scripts/upgrade.sh --pre      # include prereleases (v0.3.0-rc.1, etc.)
+#   scripts/upgrade.sh --apply    # apply the latest stable release
+#   scripts/upgrade.sh --apply --yes    # non-interactive apply
+#   scripts/upgrade.sh --pre      # include prereleases
 #   scripts/upgrade.sh v0.2.5     # upgrade to a specific tag
-set -euo pipefail
+#   scripts/upgrade.sh v0.2.5 --apply --yes   # non-interactive
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# No `set -u`: this script handles many empty/default values and we
+# prefer friendly errors over "unbound variable" tracebacks.
+set -eo pipefail
+
+# ─── constants ────────────────────────────────────────────────────────────────
+readonly REPO_OWNER_DEFAULT="asoton"
+readonly REPO_NAME="smartolt-automate"
+readonly HEALTHCHECK_URL="http://localhost/api/service/livez"
+readonly HEALTHCHECK_TIMEOUT=4
+readonly HEALTHCHECK_RETRIES=15
+readonly HEALTHCHECK_INTERVAL=3
+readonly IMAGE_VARS=(
+  "SMARTOLT_IMAGE:smartolt-automate"
+  "SMARTOLT_FRONTEND_IMAGE:smartolt-automate-frontend"
+  "PROXY_IMAGE:smartolt-automate-proxy"
+  "CERTBOT_IMAGE:smartolt-automate-certbot"
+)
+
+# ─── output ──────────────────────────────────────────────────────────────────
+if [[ -t 1 ]]; then
+  readonly C_BOLD=$'\033[1m'
+  readonly C_GREEN=$'\033[32m'
+  readonly C_YELLOW=$'\033[33m'
+  readonly C_RED=$'\033[31m'
+  readonly C_BLUE=$'\033[36m'
+  readonly C_NC=$'\033[0m'
+else
+  readonly C_BOLD=""
+  readonly C_GREEN=""
+  readonly C_YELLOW=""
+  readonly C_RED=""
+  readonly C_BLUE=""
+  readonly C_NC=""
+fi
+
+step() { printf "\n%s==>%s %s%s%s\n" "$C_BLUE" "$C_NC" "$C_BOLD" "$*" "$C_NC"; }
+ok()   { printf "    %s✓%s %s\n" "$C_GREEN" "$C_NC" "$*"; }
+warn() { printf "    %s!%s %s\n" "$C_YELLOW" "$C_NC" "$*"; }
+err()  { printf "    %s✗%s %s\n" "$C_RED" "$C_NC" "$*" >&2; }
+die()  { err "$*"; exit 1; }
+
+# ─── TTY probe (same trick as install.sh) ────────────────────────────────────
+have_tty() {
+  [[ -t 0 ]] && return 0
+  if { exec 3</dev/tty; } 2>/dev/null; then
+    exec 3<&-
+    return 0
+  fi
+  return 1
+}
+
+# Read a Y/n answer from /dev/tty if possible, else stdin, else default.
+# Sets the named variable to "y" or "n". If $3 is "force" or stdin is not
+# a TTY, the default is taken without asking.
+read_yn() {
+  local var_name="$1" prompt="$2" default="${3:-Y}" force="${4:-}"
+  local reply=""
+  if [[ "$force" == "force" || ! -t 0 && ! -r /dev/tty ]]; then
+    reply="$default"
+  elif have_tty; then
+    local shown
+    if [[ "$default" =~ ^[Yy]$ ]]; then shown="Y/n"; else shown="y/N"; fi
+    read -r -p "    $prompt [$shown]: " reply </dev/tty || true
+    reply="${reply:-$default}"
+  else
+    reply="$default"
+  fi
+  if [[ "$reply" =~ ^[Yy]$ ]]; then
+    printf -v "$var_name" 'y'
+  else
+    printf -v "$var_name" 'n'
+  fi
+}
+
+# ─── parse arguments ─────────────────────────────────────────────────────────
+MODE="check"          # check | apply
+INCLUDE_PRERELEASE=0
+ASSUME_YES=0
+TARGET_TAG=""
+HAS_CHECK_FLAG=0
+HAS_APPLY_FLAG=0
+ORIG_ARGS=("$@")
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --check) MODE="check"; HAS_CHECK_FLAG=1 ;;
+    --apply) MODE="apply"; HAS_APPLY_FLAG=1 ;;
+    --pre)   INCLUDE_PRERELEASE=1 ;;
+    --yes|-y) ASSUME_YES=1 ;;
+    --help|-h)
+      sed -n '2,20p' "$0"
+      exit 0
+      ;;
+    --*)
+      die "Unknown flag: $1 (try --help)"
+      ;;
+    v*|[0-9]*)
+      if [[ -n "$TARGET_TAG" ]]; then
+        die "Multiple target tags: $TARGET_TAG and $1"
+      fi
+      TARGET_TAG="$1"
+      ;;
+    *)
+      die "Unknown argument: $1 (try --help)"
+      ;;
+  esac
+  shift
+done
+
+# A bare positional tag implies --apply unless --check was explicit.
+# `upgrade.sh v0.2.0`         -> apply
+# `upgrade.sh v0.2.0 --check` -> check
+# `upgrade.sh --check v0.2.0` -> check
+if [[ -n "$TARGET_TAG" && $HAS_APPLY_FLAG -eq 0 && $HAS_CHECK_FLAG -eq 0 ]]; then
+  MODE="apply"
+fi
+
+# ─── sanity checks ──────────────────────────────────────────────────────────
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$ROOT"
 
-# ─── output helpers ───────────────────────────────────────────────────────────
-if [[ -t 1 ]]; then
-  BOLD="\033[1m"; GREEN="\033[32m"; YELLOW="\033[33m"; RED="\033[31m"; BLUE="\033[36m"; NC="\033[0m"
-else
-  BOLD=""; GREEN=""; YELLOW=""; RED=""; BLUE=""; NC=""
-fi
-step() { printf "\n${BLUE}==>${NC} ${BOLD}%s${NC}\n" "$1"; }
-ok()   { printf "    ${GREEN}\u2713${NC} %s\n" "$1"; }
-warn() { printf "    ${YELLOW}!${NC} %s\n" "$1"; }
-err()  { printf "    ${RED}\u2717${NC} %s\n" "$1"; }
-
-# ─── args ────────────────────────────────────────────────────────────────────
-MODE="check"        # check | apply
-INCLUDE_PRERELEASE=0
-TARGET_TAG=""
-for arg in "$@"; do
-  case "$arg" in
-    --check) MODE="check" ;;
-    --apply) MODE="apply" ;;
-    --pre)   INCLUDE_PRERELEASE=1 ;;
-    --help|-h)
-      sed -n '2,12p' "$0"
-      exit 0
-      ;;
-    v*|[0-9]*)
-      if [[ -z "$TARGET_TAG" ]]; then
-        TARGET_TAG="$arg"
-        MODE="${MODE:-apply}"
-      else
-        err "Multiple target tags specified: $TARGET_TAG and $arg"
-        exit 1
-      fi
-      ;;
-    *)
-      err "Unknown argument: $arg"
-      exit 1
-      ;;
-  esac
-done
-
-# ─── sanity ──────────────────────────────────────────────────────────────────
-if [[ ! -f ".env" ]]; then
-  err "No .env file found. Run scripts/install.sh first."
-  exit 1
-fi
-require_cmd() { command -v "$1" >/dev/null 2>&1 || { err "Missing dependency: $1"; exit 1; }; }
-require_cmd docker
-require_cmd python3 || require_cmd python
+[[ -f ".env" ]] || die "No .env found. Run scripts/install.sh first."
+command -v docker >/dev/null 2>&1 || die "Missing dependency: docker"
 PYTHON="$(command -v python3 || command -v python)"
+[[ -n "$PYTHON" ]] || die "Missing dependency: python3 (or python)"
+command -v curl >/dev/null 2>&1 || die "Missing dependency: curl"
 
 # ─── read currently installed image tag ──────────────────────────────────────
-# Take the tag portion of SMARTOLT_IMAGE (asoton/smartolt-automate:vX.Y.Z).
+#
+# Use Python (not grep/sed) so we can handle quoted values, comments, etc.
 get_env_var() {
-  local key="$1"
-  local val
-  val=$(grep -E "^${key}=" .env | head -1 | cut -d= -f2-)
-  # strip comments and surrounding quotes
-  val="${val%%#*}"
-  val="${val%\"}"
-  val="${val#\"}"
-  printf '%s' "$val"
-}
-
-CURRENT_BACKEND=$(get_env_var SMARTOLT_IMAGE)
-CURRENT_TAG="${CURRENT_BACKEND##*:}"
-
-# Default to the project's default if the value is missing.
-if [[ -z "$CURRENT_TAG" || "$CURRENT_TAG" == "$CURRENT_BACKEND" ]]; then
-  CURRENT_TAG="v0.2.0"
-fi
-
-# ─── fetch remote tags from Docker Hub ────────────────────────────────────────
-REPO_OWNER="${DOCKERHUB_NAMESPACE:-asoton}"
-REPO_NAME="smartolt-automate"
-step "Checking Docker Hub for ${REPO_OWNER}/${REPO_NAME} tags..."
-
-# We don't need auth for a public pull list. Two requests, both unauthenticated.
-get_remote_tags() {
-  # Public, anonymous. The 401 response is what tells us the token endpoint to use.
-  local tok
-  tok=$(curl -sS \
-    "https://auth.docker.io/token?service=registry.docker.io&scope=repository:${REPO_OWNER}/${REPO_NAME}:pull" \
-    | "$PYTHON" -c "import sys,json; print(json.load(sys.stdin).get('token',''))")
-  if [[ -z "$tok" ]]; then
-    return 1
-  fi
-  curl -sS -H "Authorization: Bearer $tok" \
-    "https://registry-1.docker.io/v2/${REPO_OWNER}/${REPO_NAME}/tags/list" \
-    | "$PYTHON" -c "
-import json, sys, re
-data = json.load(sys.stdin)
-tags = data.get('tags', [])
-semver = []
-for t in tags:
-    m = re.match(r'^v?(\d+)\.(\d+)\.(\d+)(?:-(.+))?$', t)
-    if m:
-        major, minor, patch, pre = int(m.group(1)), int(m.group(2)), int(m.group(3)), m.group(4)
-        semver.append((major, minor, patch, pre or '', t))
-semver.sort(key=lambda x: (x[0], x[1], x[2], 0 if x[3] == '' else 1))
-for _, _, _, _, t in semver:
-    print(t)
-"
-}
-
-REMOTE_TAGS=$(get_remote_tags) || {
-  err "Failed to list tags from Docker Hub (network issue?)"
-  exit 1
-}
-
-if [[ -z "$REMOTE_TAGS" ]]; then
-  err "No semver tags found on Docker Hub for ${REPO_OWNER}/${REPO_NAME}."
-  exit 1
-fi
-
-# ─── filter prereleases unless requested ─────────────────────────────────────
-FILTERED_TAGS="$REMOTE_TAGS"
-if [[ "$INCLUDE_PRERELEASE" == "0" ]]; then
-  FILTERED_TAGS=$(printf '%s\n' "$REMOTE_TAGS" | grep -vE -- '-rc|-alpha|-beta|-dev' || true)
-fi
-
-LATEST_TAG=$(printf '%s\n' "$FILTERED_TAGS" | tail -1)
-if [[ -z "$LATEST_TAG" ]]; then
-  err "No stable tags available (only prereleases; rerun with --pre)."
-  exit 1
-fi
-
-# ─── compare versions ────────────────────────────────────────────────────────
-cmp_versions() {
-  # echo 1 if $1 > $2, 0 if equal, -1 if less. Strips leading 'v'.
-  "$PYTHON" - "$1" "$2" <<'PY'
-import re, sys
-def parse(v):
-    m = re.match(r'^v?(\d+)\.(\d+)\.(\d+)(?:-(.+))?$', v)
+  "$PYTHON" - "$1" .env <<'PY'
+import sys, pathlib, re
+key, path = sys.argv[1], sys.argv[2]
+p = pathlib.Path(path)
+if not p.exists():
+    sys.exit(0)
+for line in p.read_text().splitlines():
+    line = line.strip()
+    if not line or line.startswith("#"):
+        continue
+    m = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$', line)
     if not m:
-        sys.exit(2)
-    return int(m.group(1)), int(m.group(2)), int(m.group(3)), m.group(4) or ''
-a, b = parse(sys.argv[1]), parse(sys.argv[2])
-# stable > prerelease
-sa, sb = a[3] == '', b[3] == ''
-if sa != sb:
-    sys.exit(0 if sa else 1)  # stable wins
-if a[:3] != b[:3]:
-    sys.exit(0 if a[:3] > b[:3] else 1)
-sys.exit(0 if a[3] > b[3] else (0 if a[3] < b[3] else 2))  # 2 = equal
+        continue
+    k, raw = m.group(1), m.group(2)
+    if k != key:
+        continue
+    # Strip comments at the end of the line (but not inside quotes).
+    # Easiest correct approach: find matching closing quote.
+    val = raw
+    if val.startswith('"'):
+        end = val.find('"', 1)
+        if end != -1:
+            val = val[1:end]
+            # unescape python-dotenv style: \\ and \"
+            val = val.replace('\\\\', '\x00').replace('\\"', '"').replace('\x00', '\\')
+            print(val, end="")
+            sys.exit(0)
+    elif val.startswith("'"):
+        end = val.find("'", 1)
+        if end != -1:
+            print(val[1:end], end="")
+            sys.exit(0)
+    # bare value
+    val = val.split('#', 1)[0].rstrip()
+    print(val, end="")
+    sys.exit(0)
 PY
 }
 
-# cmp_versions exits 0 if $1 > $2, 1 if $1 < $2, 2 if equal. We invert
-# because shell `if` treats 0 as success.
-is_newer() {
-  cmp_versions "$1" "$2"
-  case $? in
-    0) return 0 ;;  # newer
-    1|2) return 1 ;;
-    *) return 2 ;;
-  esac
+CURRENT_BACKEND="$(get_env_var SMARTOLT_IMAGE)"
+CURRENT_TAG="${CURRENT_BACKEND##*:}"
+if [[ -z "$CURRENT_TAG" || "$CURRENT_TAG" == "$CURRENT_BACKEND" ]]; then
+  # Either no SMARTOLT_IMAGE in .env, or it's a digest (sha256:...).
+  CURRENT_TAG="v0.2.0"
+fi
+
+# ─── fetch remote tags from Docker Hub ───────────────────────────────────────
+REPO_OWNER="${DOCKERHUB_NAMESPACE:-$REPO_OWNER_DEFAULT}"
+
+step "Checking Docker Hub for ${REPO_OWNER}/${REPO_NAME} tags"
+
+# Single Python call does the whole thing: auth, fetch, parse, sort, filter.
+# Returns one tag per line, highest first.
+get_remote_tags() {
+  "$PYTHON" - "$REPO_OWNER" "$REPO_NAME" "$INCLUDE_PRERELEASE" <<'PY'
+import json, sys, urllib.request, urllib.error, re
+
+owner, repo, include_pre = sys.argv[1], sys.argv[2], int(sys.argv[3])
+
+try:
+    # Get an anonymous bearer token (works for public repos).
+    auth_url = f"https://auth.docker.io/token?service=registry.docker.io&scope=repository:{owner}/{repo}:pull"
+    with urllib.request.urlopen(auth_url, timeout=10) as r:
+        tok = json.loads(r.read())["token"]
+    req = urllib.request.Request(
+        f"https://registry-1.docker.io/v2/{owner}/{repo}/tags/list",
+        headers={"Authorization": f"Bearer {tok}"},
+    )
+    with urllib.request.urlopen(req, timeout=10) as r:
+        data = json.loads(r.read())
+except Exception as e:
+    print(f"# error: {e}", file=sys.stderr)
+    sys.exit(1)
+
+tags = data.get("tags", [])
+parsed = []
+for t in tags:
+    m = re.match(r"^v?(\d+)\.(\d+)\.(\d+)(?:[-.](.+))?$", t)
+    if not m:
+        continue
+    major, minor, patch = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    pre = m.group(4) or ""
+    if pre and not include_pre:
+        continue
+    # Sort key: (major, minor, patch, is_prerelease, pre_str)
+    # stable > prerelease at the same x.y.z
+    parsed.append((major, minor, patch, 0 if pre == "" else 1, pre, t))
+
+# Highest first.
+parsed.sort(reverse=True)
+for _, _, _, _, _, t in parsed:
+    print(t)
+PY
 }
 
+REMOTE_TAGS="$(get_remote_tags || true)"
+if [[ -z "$REMOTE_TAGS" ]]; then
+  die "No semver tags available on Docker Hub for ${REPO_OWNER}/${REPO_NAME} (network error?)"
+fi
+
+LATEST_TAG="$(printf '%s\n' "$REMOTE_TAGS" | head -1)"
+if [[ -z "$LATEST_TAG" ]]; then
+  die "No tags found. (Try --pre to include prereleases.)"
+fi
+
+# Determine the next tag.
+NEXT_TAG="$LATEST_TAG"
+if [[ -n "$TARGET_TAG" ]]; then
+  # Validate that the requested tag actually exists.
+  if ! printf '%s\n' "$REMOTE_TAGS" | grep -qx "$TARGET_TAG"; then
+    die "Tag '$TARGET_TAG' not found on Docker Hub. Latest available: $LATEST_TAG"
+  fi
+  NEXT_TAG="$TARGET_TAG"
+fi
+
+# ─── compare versions ────────────────────────────────────────────────────────
+# Returns 0 if $1 == $2, 1 if $1 > $2, 2 if $1 < $2.
+version_cmp() {
+  "$PYTHON" - "$1" "$2" <<'PY'
+import re, sys
+def parse(v):
+    m = re.match(r"^v?(\d+)\.(\d+)\.(\d+)(?:[-.](.+))?$", v)
+    if not m:
+        sys.exit(2)
+    return int(m.group(1)), int(m.group(2)), int(m.group(3)), m.group(4) or ""
+a = parse(sys.argv[1]); b = parse(sys.argv[2])
+sa, sb = a[3] == "", b[3] == ""
+# Stable > prerelease.
+if sa and not sb: sys.exit(1)
+if sb and not sa: sys.exit(2)
+if a[:3] != b[:3]:
+    sys.exit(1 if a[:3] > b[:3] else 2)
+# Same x.y.z: prerelease string compared lexicographically.
+if a[3] == b[3]: sys.exit(0)
+sys.exit(1 if a[3] > b[3] else 2)
+PY
+}
+
+set +e
+version_cmp "$CURRENT_TAG" "$NEXT_TAG"
+cmp_result=$?
+set -e
+
+# ─── show what we found ──────────────────────────────────────────────────────
 step "Versions"
 printf "    Installed:  %s\n" "$CURRENT_TAG"
 printf "    Latest:     %s\n" "$LATEST_TAG"
-
 if [[ -n "$TARGET_TAG" ]]; then
   printf "    Requested:  %s\n" "$TARGET_TAG"
 fi
 
-# Determine what tag we'll be moving to.
-NEXT_TAG="$LATEST_TAG"
-if [[ -n "$TARGET_TAG" ]]; then
-  NEXT_TAG="$TARGET_TAG"
-fi
-
-# cmp_versions exits 0 if $1 > $2, 1 if $1 < $2, 2 if equal.
-# is_newer $a $b returns 0 if $a > $b, 1 otherwise.
-if is_newer "$CURRENT_TAG" "$NEXT_TAG"; then
-  warn "Downgrade detected: $CURRENT_TAG -> $NEXT_TAG"
-elif is_newer "$NEXT_TAG" "$CURRENT_TAG"; then
-  # NEXT_TAG is newer; nothing to do for now.
-  :
-else
-  ok "Already on $CURRENT_TAG (no upgrade needed)."
-  if [[ "$MODE" == "check" ]]; then
+case "$cmp_result" in
+  0)
+    if [[ -n "$TARGET_TAG" ]]; then
+      warn "Already on the requested tag ($CURRENT_TAG)."
+    else
+      ok "Already on the latest stable release ($CURRENT_TAG)."
+    fi
     exit 0
-  fi
-  # In --apply mode with no version change, just confirm and exit.
-  if [[ -z "$TARGET_TAG" ]]; then
-    exit 0
-  fi
-  # User explicitly asked for a specific tag equal to current.
-  warn "Requested tag equals the installed one; nothing to do."
-  exit 0
-fi
+    ;;
+  1)
+    warn "Downgrade detected: $CURRENT_TAG -> $NEXT_TAG"
+    ;;
+  2)
+    # CURRENT < NEXT, this is the normal upgrade path.
+    ;;
+  *)
+    die "Could not compare versions: $CURRENT_TAG vs $NEXT_TAG"
+    ;;
+esac
 
-# If mode is 'check', stop here.
+# ─── check-only mode stops here ─────────────────────────────────────────────
 if [[ "$MODE" == "check" ]]; then
-  printf "\nRun '${BOLD}scripts/upgrade.sh --apply${NC}' to upgrade to ${NEXT_TAG}.\n"
+  printf "\nRun '%sscripts/upgrade.sh --apply%s' to upgrade to %s%s%s.\n" \
+    "$C_BOLD" "$C_NC" "$C_BLUE" "$NEXT_TAG" "$C_NC"
   exit 0
 fi
 
 # ─── confirm before applying ─────────────────────────────────────────────────
 printf "\nThis will:\n"
-printf "  - update .env to use %s\n" "$NEXT_TAG"
+printf "  - update .env to use %s%s%s\n" "$C_BOLD" "$NEXT_TAG" "$C_NC"
 printf "  - pull new images for backend, frontend, proxy, and certbot\n"
 printf "  - recreate the smartolt-automate and web containers\n"
 printf "  - leave data/, logs/, configs/, and the database untouched\n\n"
 
-if [[ -t 0 ]]; then
-  read -r -p "Proceed? [Y/n]: " reply
-  reply="${reply:-Y}"
-  if [[ ! "$reply" =~ ^[Yy]$ ]]; then
+if [[ $ASSUME_YES -eq 0 ]]; then
+  PROCEED="n"
+  read_yn PROCEED "Proceed?" "Y"
+  if [[ "$PROCEED" != "y" ]]; then
     echo "Aborted."
     exit 0
   fi
@@ -237,54 +345,136 @@ fi
 
 # ─── apply the upgrade ───────────────────────────────────────────────────────
 step "Updating .env to ${NEXT_TAG}"
-for var in SMARTOLT_IMAGE SMARTOLT_FRONTEND_IMAGE PROXY_IMAGE CERTBOT_IMAGE; do
-  if grep -qE "^${var}=" .env; then
-    new_value="${REPO_OWNER}/$(echo "$var" | sed -E 's|^SMARTOLT_(.*)_IMAGE|\1|; s|^PROXY_IMAGE$|smartolt-automate-proxy|; s|^CERTBOT_IMAGE$|smartolt-automate-certbot|'):${NEXT_TAG}"
-    # Map variable to image name. Do it explicitly to avoid sed backrefs hell.
-    case "$var" in
-      SMARTOLT_IMAGE)          new_value="${REPO_OWNER}/smartolt-automate:${NEXT_TAG}" ;;
-      SMARTOLT_FRONTEND_IMAGE) new_value="${REPO_OWNER}/smartolt-automate-frontend:${NEXT_TAG}" ;;
-      PROXY_IMAGE)             new_value="${REPO_OWNER}/smartolt-automate-proxy:${NEXT_TAG}" ;;
-      CERTBOT_IMAGE)           new_value="${REPO_OWNER}/smartolt-automate-certbot:${NEXT_TAG}" ;;
-    esac
-    # Use a python one-liner to do safe in-place rewrite (no sed escaping issues).
-    "$PYTHON" - "$var" "$new_value" .env <<'PY'
-import sys, pathlib
-key, new, path = sys.argv[1], sys.argv[2], sys.argv[3]
-p = pathlib.Path(path)
-lines = p.read_text().splitlines()
-out = []
-replaced = False
-for line in lines:
-    if line.startswith(f"{key}="):
-        out.append(f"{key}={new}")
-        replaced = True
-    else:
-        out.append(line)
-if not replaced:
-    out.append(f"{key}={new}")
-p.write_text("\n".join(out) + "\n")
-PY
-    ok "$var=$new_value"
+
+# Snapshot .env before we touch it so we can roll back if the pull
+# (or recreate) fails. A partial upgrade (env says v0.2.1 but only
+# some images were pulled) leaves the stack in a broken state.
+ENV_BACKUP=""
+ROLLBACK_DONE=0
+cleanup_and_exit() {
+  local rc=$?
+  # If we still have the backup AND haven't committed the upgrade,
+  # restore it. This is what gives us atomic semantics.
+  if [[ -n "$ENV_BACKUP" && -f "$ENV_BACKUP" && $ROLLBACK_DONE -eq 0 ]]; then
+    cp -f "$ENV_BACKUP" .env
+    warn "Rolled .env back to the pre-upgrade state."
   fi
+  [[ -n "$ENV_BACKUP" && -f "$ENV_BACKUP" ]] && rm -f "$ENV_BACKUP"
+  exit $rc
+}
+trap cleanup_and_exit EXIT INT TERM
+ENV_BACKUP="$(mktemp -t upgrade-env-XXXXXX.bak)"
+cp -f .env "$ENV_BACKUP"
+
+# Build a list of (var, value) pairs and call env_set once.
+# env_set is defined inline so the script is self-contained.
+env_set() {
+  "$PYTHON" - "$@" <<'PY'
+import sys, pathlib, re
+
+def quote_value(v: str) -> str:
+    out = []
+    for ch in v:
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch == '"':
+            out.append('\\"')
+        else:
+            out.append(ch)
+    return '"' + "".join(out) + '"'
+
+def needs_quote(v: str) -> bool:
+    if not v:
+        return True
+    if any(c in v for c in ' \t"\'#$&`\\'):
+        return True
+    if v.startswith(("-", "+", ".")):
+        return True
+    return False
+
+# argv: env_path, then key/value pairs
+path = pathlib.Path(sys.argv[1])
+pairs = []
+i = 2
+while i < len(sys.argv):
+    pairs.append((sys.argv[i], sys.argv[i+1]))
+    i += 2
+
+existing = {}
+for line in path.read_text().splitlines() if path.exists() else []:
+    if not line or line.lstrip().startswith("#") or "=" not in line:
+        continue
+    k = line.split("=", 1)[0].strip()
+    if k not in existing:
+        existing[k] = line
+
+out_lines = []
+for k, line in existing.items():
+    if any(p[0] == k for p in pairs):
+        continue
+    out_lines.append(line)
+for k, v in pairs:
+    if needs_quote(v):
+        out_lines.append(f"{k}={quote_value(v)}")
+    else:
+        out_lines.append(f"{k}={v}")
+path.write_text("\n".join(out_lines) + "\n")
+PY
+}
+
+args=(".env")
+for spec in "${IMAGE_VARS[@]}"; do
+  var="${spec%%:*}"
+  image="${spec##*:}"
+  args+=("$var" "${REPO_OWNER}/${image}:${NEXT_TAG}")
+done
+env_set "${args[@]}"
+for spec in "${IMAGE_VARS[@]}"; do
+  var="${spec%%:*}"
+  image="${spec##*:}"
+  ok "$var=${REPO_OWNER}/${image}:${NEXT_TAG}"
 done
 
+# ─── pull + recreate ────────────────────────────────────────────────────────
 step "Pulling new images"
-docker compose pull
+if ! docker compose pull; then
+  die "docker compose pull failed. Check your network and that the tag exists."
+fi
+ok "Images pulled"
+
+# Pull succeeded; mark the new state as committed so the EXIT trap
+# doesn't roll it back.
+ROLLBACK_DONE=1
+rm -f "$ENV_BACKUP"
+ENV_BACKUP=""
 
 step "Recreating smartolt-automate and web"
-docker compose up -d --force-recreate smartolt-automate web
+if ! docker compose up -d --force-recreate smartolt-automate web; then
+  die "docker compose up -d failed. Inspect 'docker compose logs' for details."
+fi
+ok "Containers recreated"
 
+# ─── healthcheck ────────────────────────────────────────────────────────────
 step "Waiting for healthchecks"
-for i in 1 2 3 4 5 6 7 8 9 10; do
-  if curl -sSf -o /dev/null --max-time 4 http://localhost/api/service/livez 2>/dev/null; then
-    ok "Service is up at http://localhost/"
+up=0
+for ((i = 1; i <= HEALTHCHECK_RETRIES; i++)); do
+  if curl --silent --show-error --fail --output /dev/null \
+       --connect-timeout 2 --max-time "$HEALTHCHECK_TIMEOUT" \
+       "$HEALTHCHECK_URL"; then
+    up=1
+    ok "Service reachable at $HEALTHCHECK_URL"
     break
   fi
-  sleep 3
+  printf "  ... retry %d/%d\n" "$i" "$HEALTHCHECK_RETRIES"
+  sleep "$HEALTHCHECK_INTERVAL"
 done
+
+if [[ $up -ne 1 ]]; then
+  warn "Healthcheck did not respond within the timeout. Run 'docker compose logs web' to debug."
+  exit 2
+fi
 
 step "Done"
 printf "  Previous version:  %s\n" "$CURRENT_TAG"
 printf "  Current version:   %s\n" "$NEXT_TAG"
-printf "\n  Verify the panel at ${BLUE}http://localhost/${NC}\n"
+printf "\n  Verify the panel at %shttp://localhost/%s\n" "$C_BLUE" "$C_NC"
