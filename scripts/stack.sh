@@ -47,6 +47,11 @@ case "$cmd" in
     docker compose config "$@"
     ;;
   upgrade)
+    # If the upgrade.sh script is present and no specific tag was passed,
+    # delegate to it so the user gets the new-version check.
+    if [[ -x "scripts/upgrade.sh" ]] && [[ $# -eq 0 ]]; then
+      exec scripts/upgrade.sh --apply
+    fi
     docker compose pull "$@"
     docker compose up -d
     docker compose ps

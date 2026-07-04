@@ -99,6 +99,22 @@ The web tier mounts `/var/run/docker.sock` so it can `docker compose exec` into 
 ## Updating
 
 ```bash
+./scripts/upgrade.sh          # check Docker Hub for a newer version
+./scripts/upgrade.sh --apply  # upgrade to the latest stable release
+./scripts/upgrade.sh v0.3.0   # upgrade to a specific tag
+./scripts/upgrade.sh --pre    # include prereleases (v0.3.0-rc.1, etc.)
+```
+
+The upgrade script:
+- Reads the current version from `.env`.
+- Lists all semver tags on Docker Hub.
+- Picks the highest stable release (or the version you specified).
+- Updates `.env`, pulls the new images, and recreates only the `smartolt-automate` and `web` containers.
+- Leaves `data/`, `logs/`, `configs/`, and the database untouched.
+
+If you prefer manual control:
+
+```bash
 # Edit .env to set a new image tag, e.g.:
 #   SMARTOLT_IMAGE=asoton/smartolt-automate:v0.3.0
 ./scripts/stack.sh upgrade
