@@ -21,8 +21,15 @@ else
   BOLD=""; GREEN=""; YELLOW=""; RED=""; BLUE=""; NC=""
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# When piped from curl, $0 is 'bash' and BASH_SOURCE[0] is unset. We tolerate that.
+SCRIPT_PATH="${BASH_SOURCE[0]:-$0}"
+# Resolve script dir: works when invoked as a file; falls back to '.' when piped.
+if [[ -n "${SCRIPT_PATH}" && "${SCRIPT_PATH}" != "bash" && -f "${SCRIPT_PATH}" ]]; then
+  SCRIPT_DIR="$(cd "$(dirname "${SCRIPT_PATH}")" && pwd)"
+else
+  SCRIPT_DIR="$(pwd)"
+fi
+ROOT="$(cd "$SCRIPT_DIR/.." 2>/dev/null && pwd || echo "$SCRIPT_DIR")"
 cd "$ROOT"
 
 # ─── defaults ─────────────────────────────────────────────────────────────────
@@ -119,9 +126,11 @@ if [[ "$KEEP_DB" == "y" ]]; then
   warn "Keeping existing database — admin credentials below apply only on a fresh DB."
 fi
 ask ADMIN_USER     "Admin username"               "admin"
+ADMIN_PASSWORD=""
 ask ADMIN_PASSWORD "Admin password (min 8 chars)" "" 1
-while [[ ${#ADMIN_PASSWORD} -lt 8 ]]; do
+while [[ "${#ADMIN_PASSWORD}" -lt 8 ]]; do
   err "Password too short (min 8 chars)."
+  ADMIN_PASSWORD=""
   ask ADMIN_PASSWORD "Admin password (min 8 chars)" "" 1
 done
 ok "Admin user: $ADMIN_USER"
