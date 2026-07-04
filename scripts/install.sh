@@ -12,261 +12,463 @@
 #
 # Re-runnable: existing .env and data/ are preserved unless explicitly overwritten.
 
-set -euo pipefail
+# Fail fast on real errors. -u is intentionally NOT set because too many things
+# in this script depend on unset variable semantics (e.g. when ask fails the
+# caller might still reference the variable; we'd rather emit a friendly
+# message than an obscure "unbound variable" error). -o pipefail keeps us
+# honest about failing commands in pipelines.
+set -eo pipefail
 
-# ─── terminal styling ──────────────────────────────────────────────────────────
+# ─── constants ────────────────────────────────────────────────────────────────
+readonly REPO_OWNER_DEFAULT="asotonet"
+readonly REPO_NAME_DEFAULT="smartolt-automate-installer"
+readonly REPO_REF_DEFAULT="main"
+readonly DEFAULT_IMAGE_TAG_DEFAULT="v0.2.0"
+readonly DOCKERHUB_NAMESPACE_DEFAULT="asoton"
+readonly COMPOSE_PROJECT_NAME_DEFAULT="smartolt_api_automate"
+
+# Files we need from the repo to do anything useful. Listed once so the
+# bootstrap can fetch them and the rest of the script can refer to them.
+readonly REQUIRED_FILES=(
+  .env.example
+  docker-compose.yml
+  configs/olts.example.yaml
+  scripts/stack.sh
+  scripts/upgrade.sh
+)
+
+# ─── output ──────────────────────────────────────────────────────────────────
+# Use ANSI escapes only when stdout is a TTY. Note: -t 1 because some
+# invocations (curl | bash) keep stdout as a pipe even when stdin is a TTY.
 if [[ -t 1 ]]; then
-  BOLD="\033[1m"; GREEN="\033[32m"; YELLOW="\033[33m"; RED="\033[31m"; BLUE="\033[36m"; NC="\033[0m"
+  readonly C_BOLD=$'\033[1m'
+  readonly C_GREEN=$'\033[32m'
+  readonly C_YELLOW=$'\033[33m'
+  readonly C_RED=$'\033[31m'
+  readonly C_BLUE=$'\033[36m'
+  readonly C_NC=$'\033[0m'
 else
-  BOLD=""; GREEN=""; YELLOW=""; RED=""; BLUE=""; NC=""
+  readonly C_BOLD=""
+  readonly C_GREEN=""
+  readonly C_YELLOW=""
+  readonly C_RED=""
+  readonly C_BLUE=""
+  readonly C_NC=""
 fi
 
-# ─── bootstrap: detect invocation mode and fetch assets if needed ─────────────
+step() { printf "\n%s==>%s %s%s%s\n" "$C_BLUE" "$C_NC" "$C_BOLD" "$*" "$C_NC"; }
+ok()   { printf "    %s✓%s %s\n" "$C_GREEN" "$C_NC" "$*"; }
+warn() { printf "    %s!%s %s\n" "$C_YELLOW" "$C_NC" "$*"; }
+err()  { printf "    %s✗%s %s\n" "$C_RED" "$C_NC" "$*" >&2; }
+die()  { err "$*"; exit 1; }
+
+# ─── detect invocation mode ──────────────────────────────────────────────────
 #
-# When invoked as 'curl ... | bash', we don't have access to .env.example,
-# docker-compose.yml, etc. We fetch the repo into a tempdir and chdir there.
-# When invoked as './scripts/install.sh' from a clone, we just use the local
-# directory.
-REPO_OWNER="${SMARTOLT_INSTALLER_REPO_OWNER:-asotonet}"
-REPO_NAME="${SMARTOLT_INSTALLER_REPO_NAME:-smartolt-automate-installer}"
-REPO_REF="${SMARTOLT_INSTALLER_REPO_REF:-main}"
-RAW_BASE="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_REF}"
+# We support two ways to invoke this script:
+#   1. 'curl ... | bash'  — $0 is 'bash' and BASH_SOURCE[0] is unset.
+#      We don't have access to the rest of the repo, so we fetch the
+#      required files from raw.githubusercontent.com into a tempdir.
+#   2. './scripts/install.sh' from a clone — $0 is a real path, we
+#      chdir to the repo root and use the local files.
+#
+# The detection must work even when set -u would be active (we don't use it,
+# but defensive code is cheap).
+SCRIPT_PATH="${BASH_SOURCE[0]:-}"
+[[ -z "$SCRIPT_PATH" || "$SCRIPT_PATH" == "bash" || ! -f "$SCRIPT_PATH" ]] \
+  && INVOCATION="piped" || INVOCATION="local"
 
-SCRIPT_PATH="${BASH_SOURCE[0]:-$0}"
-is_piped=0
-if [[ -z "${SCRIPT_PATH}" || "${SCRIPT_PATH}" == "bash" || ! -f "${SCRIPT_PATH}" ]]; then
-  is_piped=1
-fi
+TMPDIR_INSTALL=""
+cleanup() {
+  local rc=$?
+  if [[ -n "$TMPDIR_INSTALL" && -d "$TMPDIR_INSTALL" ]]; then
+    rm -rf "$TMPDIR_INSTALL"
+  fi
+  exit $rc
+}
+trap cleanup EXIT INT TERM
 
-if [[ "$is_piped" == "1" ]]; then
-  # Need to fetch the rest of the repo before we can do anything.
-  TMPDIR_INSTALL="$(mktemp -d -t smartolt-install-XXXXXX)"
-  trap 'rm -rf "$TMPDIR_INSTALL"' EXIT
-  printf "==> Fetching installer assets from %s/%s@%s ...\n" "$REPO_OWNER" "$REPO_NAME" "$REPO_REF"
-  for f in .env.example docker-compose.yml configs/olts.example.yaml scripts/stack.sh; do
+# ─── bootstrap: get into a directory with all the repo files ─────────────────
+if [[ "$INVOCATION" == "piped" ]]; then
+  REPO_OWNER="${SMARTOLT_INSTALLER_REPO_OWNER:-$REPO_OWNER_DEFAULT}"
+  REPO_NAME="${SMARTOLT_INSTALLER_REPO_NAME:-$REPO_NAME_DEFAULT}"
+  REPO_REF="${SMARTOLT_INSTALLER_REPO_REF:-$REPO_REF_DEFAULT}"
+  RAW_BASE="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_REF}"
+
+  TMPDIR_INSTALL="$(mktemp -d -t smartolt-install-XXXXXX)" \
+    || die "Could not create a temp directory."
+
+  step "0/8  Fetching installer assets"
+  printf "    Repository: %s/%s@%s\n" "$REPO_OWNER" "$REPO_NAME" "$REPO_REF"
+  printf "    URL:        %s\n" "$RAW_BASE"
+  for f in "${REQUIRED_FILES[@]}"; do
     mkdir -p "$TMPDIR_INSTALL/$(dirname "$f")"
-    if ! curl -fsSL "$RAW_BASE/$f" -o "$TMPDIR_INSTALL/$f"; then
-      printf "ERROR: failed to fetch %s\n" "$f" >&2
-      exit 1
+    if ! curl --fail --silent --show-error --location \
+         --connect-timeout 10 --max-time 60 \
+         "$RAW_BASE/$f" -o "$TMPDIR_INSTALL/$f"; then
+      die "Failed to fetch $f from $RAW_BASE/$f"
     fi
   done
-  chmod +x "$TMPDIR_INSTALL/scripts/stack.sh"
+  chmod +x "$TMPDIR_INSTALL/scripts/stack.sh" "$TMPDIR_INSTALL/scripts/upgrade.sh"
   cd "$TMPDIR_INSTALL"
-  printf "    \033[32m\u2713\033[0m Assets ready in %s\n" "$TMPDIR_INSTALL"
+  ok "Assets ready"
 else
-  SCRIPT_DIR="$(cd "$(dirname "${SCRIPT_PATH}")" && pwd)"
-  cd "$(cd "$SCRIPT_DIR/.." 2>/dev/null && pwd || echo "$SCRIPT_DIR")"
+  SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+  cd "$SCRIPT_DIR/.."
 fi
 
-# ─── output helpers ───────────────────────────────────────────────────────────
-step() { printf "\n${BLUE}==>${NC} ${BOLD}%s${NC}\n" "$1"; }
-ok()   { printf "    ${GREEN}\u2713${NC} %s\n" "$1"; }
-warn() { printf "    ${YELLOW}!${NC} %s\n" "$1"; }
-err()  { printf "    ${RED}\u2717${NC} %s\n" "$1"; }
+# After this point we MUST be in a directory that has all REQUIRED_FILES.
+for f in "${REQUIRED_FILES[@]}"; do
+  [[ -f "$f" ]] || die "Required file missing after bootstrap: $f"
+done
 
-# ─── defaults ─────────────────────────────────────────────────────────────────
-DEFAULT_IMAGE_TAG="${SMARTOLT_IMAGE_TAG:-v0.2.0}"
-DOCKERHUB_NAMESPACE="${DOCKERHUB_NAMESPACE:-asoton}"
-COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-smartolt_api_automate}"
+# ─── defaults (can be overridden via env) ────────────────────────────────────
+DEFAULT_IMAGE_TAG="${SMARTOLT_IMAGE_TAG:-$DEFAULT_IMAGE_TAG_DEFAULT}"
+DOCKERHUB_NAMESPACE="${DOCKERHUB_NAMESPACE:-$DOCKERHUB_NAMESPACE_DEFAULT}"
+COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-$COMPOSE_PROJECT_NAME_DEFAULT}"
+export COMPOSE_PROJECT_NAME
 
-ask() {
-  local var="$1" prompt="$2" default="${3:-}" secret="${4:-}"
-  local reply
-  local displayed_default="${default:-(required)}"
-
-  # When invoked via 'curl ... | bash', stdin is the script body, not the
-  # terminal. Reading from stdin would consume the rest of the script.
-  # Detect this and switch to /dev/tty so the user can actually type.
-  # We probe by trying to open /dev/tty on fd 3.
-  local tty_ok=0
-  if [[ ! -t 0 ]]; then
-    if { exec 3</dev/tty; } 2>/dev/null; then
-      tty_ok=1
-      exec 3<&-
-    fi
+# ─── input helpers ───────────────────────────────────────────────────────────
+#
+# We have to read from /dev/tty (not stdin) when invoked as 'curl | bash' because
+# stdin is the script body. We probe /dev/tty with a real open() because plain
+# [ -r /dev/tty ] returns true in headless subshells where the actual open
+# still fails.
+have_tty() {
+  [[ -t 0 ]] && return 0
+  if { exec 3</dev/tty; } 2>/dev/null; then
+    exec 3<&-
+    return 0
   fi
-
-  if [[ "$tty_ok" == "1" ]]; then
-    if [[ "$secret" == "1" ]]; then
-      read -r -s -p "$(printf "    %s [%s]: " "$prompt" "$displayed_default")" reply </dev/tty
-      printf "\n"
-    else
-      read -r -p "$(printf "    %s [%s]: " "$prompt" "$displayed_default")" reply </dev/tty
-    fi
-  else
-    if [[ "$secret" == "1" ]]; then
-      read -r -s -p "$(printf "    %s [%s]: " "$prompt" "$displayed_default")" reply
-      printf "\n"
-    else
-      read -r -p "$(printf "    %s [%s]: " "$prompt" "$displayed_default")" reply
-    fi
-  fi
-  reply="${reply:-$default}"
-  if [[ -z "$reply" ]]; then
-    err "Value required for $var"
-    return 1
-  fi
-  printf -v "$var" '%s' "$reply"
+  return 1
 }
 
-ask_yn() {
-  local var="$1" prompt="$2" default="${3:-Y}"
-  local reply
+# Read one line into the variable named by $1. Honors a default. If $3 is
+# "secret", the input is read with -s (no echo). Exits non-zero if the user
+# provides an empty value AND no default was given.
+#
+# Usage: read_input VAR "Prompt" [default] [secret]
+read_input() {
+  local var_name="$1" prompt="$2" default="${3:-}" mode="${4:-}"
+  local displayed="${default:-(required)}" reply=""
 
-  local tty_ok=0
-  if [[ ! -t 0 ]]; then
-    if { exec 3</dev/tty; } 2>/dev/null; then
-      tty_ok=1
-      exec 3<&-
+  if have_tty; then
+    if [[ "$mode" == "secret" ]]; then
+      read -r -s -p "    $prompt [$displayed]: " reply </dev/tty || true
+      printf "\n"
+    else
+      read -r -p "    $prompt [$displayed]: " reply </dev/tty || true
+    fi
+  else
+    # Fallback: read from stdin (only works if the user piped input in
+    # via a heredoc or printf; otherwise we block until EOF, which is
+    # the desired behavior for non-interactive runs).
+    if [[ "$mode" == "secret" ]]; then
+      read -r -s -p "    $prompt [$displayed]: " reply || true
+      printf "\n"
+    else
+      read -r -p "    $prompt [$displayed]: " reply || true
     fi
   fi
 
-  if [[ "$tty_ok" == "1" ]]; then
-    read -r -p "$(printf "    %s [Y/n]: " "$prompt")" reply </dev/tty
+  reply="${reply:-$default}"
+  if [[ -z "$reply" ]]; then
+    err "A value is required."
+    return 1
+  fi
+  printf -v "$var_name" '%s' "$reply"
+}
+
+# Yes/no prompt. Sets the named variable to "y" or "n".
+# Usage: read_yn VAR "Prompt" [default=Y|N]
+read_yn() {
+  local var_name="$1" prompt="$2" default="${3:-Y}" reply=""
+  local shown
+  if [[ "$default" =~ ^[Yy]$ ]]; then shown="Y/n"; else shown="y/N"; fi
+
+  if have_tty; then
+    read -r -p "    $prompt [$shown]: " reply </dev/tty || true
   else
-    read -r -p "$(printf "    %s [Y/n]: " "$prompt")" reply
+    read -r -p "    $prompt [$shown]: " reply || true
   fi
   reply="${reply:-$default}"
   if [[ "$reply" =~ ^[Yy]$ ]]; then
-    printf -v "$var" 'y'
+    printf -v "$var_name" 'y'
+  elif [[ "$reply" =~ ^[Nn]$ ]]; then
+    printf -v "$var_name" 'n'
   else
-    printf -v "$var" 'n'
+    err "Please answer Y or N (got '$reply')."
+    return 1
   fi
 }
 
+# Read a positive integer in [min, max]. Re-prompts on invalid input.
+# Usage: read_int VAR "Prompt" min max [default]
+read_int() {
+  local var_name="$1" prompt="$2" min="$3" max="$4" default="${5:-}" reply=""
+  while :; do
+    if ! read_input "$var_name" "$prompt ($min-$max)" "$default"; then
+      return 1
+    fi
+    reply="${!var_name}"
+    if [[ "$reply" =~ ^[0-9]+$ ]] && (( reply >= min && reply <= max )); then
+      return 0
+    fi
+    err "Enter an integer between $min and $max."
+    printf -v "$var_name" ''
+  done
+}
+
+# ─── utilities ───────────────────────────────────────────────────────────────
 require_cmd() {
-  command -v "$1" >/dev/null 2>&1 || { err "Missing dependency: $1"; return 1; }
+  command -v "$1" >/dev/null 2>&1 || die "Missing dependency: $1"
+}
+
+docker_hub_reachable() {
+  local code
+  code=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+    --connect-timeout 5 --max-time 10 \
+    "https://registry-1.docker.io/v2/" 2>/dev/null || echo 000)
+  [[ "$code" == "200" || "$code" == "401" ]]
+}
+
+# Write KEY=VALUE lines into a .env file in-place, preserving everything else
+# and quoting values that contain spaces or shell metacharacters. Uses a
+# Python one-liner so we don't have to worry about sed/escape issues.
+#
+# Quoting follows the python-dotenv / docker compose rules:
+#   - bare: KEY=value (no spaces, no '#', no '=')
+#   - double-quoted: KEY="..." with backslash escapes for " and \
+#   - single-quoted: KEY='...' (no escapes, literal)
+#
+# We always prefer double quotes because they handle the most cases
+# (including values that contain single quotes like "O'Brien").
+env_set() {
+  local file="$1"; shift
+  python3 - "$file" "$@" <<'PY'
+import sys, pathlib
+
+def quote_value(v: str) -> str:
+    # Always quote. This is conservative but eliminates edge cases.
+    # Escape backslash and double-quote only.
+    out = []
+    for ch in v:
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch == '"':
+            out.append('\\"')
+        elif ch == "\n":
+            out.append("\\n")
+        else:
+            out.append(ch)
+    return '"' + "".join(out) + '"'
+
+def needs_quote(v: str) -> bool:
+    # Values that need quoting: empty, contain whitespace, '#', '=', '"', "'", etc.
+    if not v:
+        return True
+    if any(c in v for c in ' \t"\'#$&`\\'):
+        return True
+    if v.startswith(("-", "+", ".")):
+        # Bare values that look like numbers/flags could be ambiguous.
+        return True
+    return False
+
+path = pathlib.Path(sys.argv[1])
+pairs = []
+i = 2
+while i < len(sys.argv):
+    pairs.append((sys.argv[i], sys.argv[i+1]))
+    i += 2
+
+existing = {}
+order = []
+if path.exists():
+    for line in path.read_text().splitlines():
+        if not line or line.lstrip().startswith("#") or "=" not in line:
+            continue
+        key, _, _ = line.partition("=")
+        if key in existing:
+            continue
+        existing[key] = line
+        order.append(key)
+
+out_lines = []
+written = set()
+for key, line in existing.items():
+    if any(k == key for k, _ in pairs):
+        continue
+    out_lines.append(line)
+for k, v in pairs:
+    if needs_quote(v):
+        out_lines.append(f"{k}={quote_value(v)}")
+    else:
+        out_lines.append(f"{k}={v}")
+    written.add(k)
+for k, v in pairs:
+    if k not in written:
+        if needs_quote(v):
+            out_lines.append(f"{k}={quote_value(v)}")
+        else:
+            out_lines.append(f"{k}={v}")
+path.write_text("\n".join(out_lines) + "\n")
+PY
 }
 
 # ─── 1. prerequisites ─────────────────────────────────────────────────────────
-step "1/7  Verifying prerequisites"
-require_cmd docker || exit 1
+step "1/8  Verifying prerequisites"
+require_cmd docker
 ok "docker $(docker --version | awk '{print $3}' | tr -d ',')"
 
 if ! docker info >/dev/null 2>&1; then
-  err "Can't reach the Docker daemon. Is it running?"
-  exit 1
+  die "Docker daemon is not reachable. Is Docker running?"
 fi
 ok "Docker daemon reachable"
 
-if ! docker compose version >/dev/null 2>&1; then
-  if ! command -v docker-compose >/dev/null 2>&1; then
-    err "Neither 'docker compose' (v2) nor 'docker-compose' (v1) found."
-    exit 1
-  fi
-  warn "Found legacy docker-compose v1. Consider migrating to the 'docker compose' plugin."
+if docker compose version >/dev/null 2>&1; then
+  ok "docker compose available"
+elif command -v docker-compose >/dev/null 2>&1; then
+  warn "Found legacy docker-compose v1. The 'docker compose' plugin is recommended."
+else
+  die "Neither 'docker compose' (v2) nor 'docker-compose' (v1) found."
 fi
-ok "docker compose available"
 
-# Connectivity to Docker Hub (informational)
-if curl -sS --max-time 5 -o /dev/null -w '%{http_code}' \
-  "https://registry-1.docker.io/v2/" | grep -q '^200\|^401$'; then
+if docker_hub_reachable; then
   ok "Docker Hub reachable"
 else
-  warn "Docker Hub not reachable from this network. 'docker compose pull' may fail."
+  warn "Docker Hub not reachable. 'docker compose pull' will fail until network is fixed."
 fi
 
 # ─── 2. current state ─────────────────────────────────────────────────────────
-step "2/7  Inspecting current state"
+step "2/8  Inspecting current state"
+
+OVERWRITE_ENV="n"
 if [[ -f ".env" ]]; then
   warn "Existing .env found in this directory."
-  ask_yn OVERWRITE_ENV "Overwrite .env?"
-else
-  OVERWRITE_ENV="y"
+  if ! read_yn OVERWRITE_ENV "Overwrite .env?" "N"; then
+    die "Aborted by user."
+  fi
 fi
 
+KEEP_DB="Y"
 if [[ -d "data" && -f "data/app.db" ]]; then
   warn "Existing database found (data/app.db)."
-  ask_yn KEEP_DB "Keep database (admin users, history)?" "Y"
-else
-  KEEP_DB="Y"
+  if ! read_yn KEEP_DB "Keep database (admin users, history)?" "Y"; then
+    die "Aborted by user."
+  fi
 fi
 
 # ─── 3. admin credentials ─────────────────────────────────────────────────────
-step "3/7  Admin credentials"
-if [[ "$KEEP_DB" == "y" ]]; then
-  warn "Keeping existing database — admin credentials below apply only on a fresh DB."
+step "3/8  Admin credentials"
+if [[ "$KEEP_DB" == "y" && -f "data/app.db" ]]; then
+  warn "Keeping existing database — these credentials apply only on a fresh DB."
 fi
-ask ADMIN_USER     "Admin username"               "admin"
+
+if ! read_input ADMIN_USER "Admin username" "admin"; then
+  die "Admin username is required."
+fi
+
 ADMIN_PASSWORD=""
-ask ADMIN_PASSWORD "Admin password (min 8 chars)" "" 1
-while [[ "${#ADMIN_PASSWORD}" -lt 8 ]]; do
-  err "Password too short (min 8 chars)."
+while :; do
+  if ! read_input ADMIN_PASSWORD "Admin password (min 8 chars)" "" "secret"; then
+    die "Admin password is required."
+  fi
+  if [[ "${#ADMIN_PASSWORD}" -ge 8 ]]; then
+    break
+  fi
+  err "Password too short (min 8 characters)."
   ADMIN_PASSWORD=""
-  ask ADMIN_PASSWORD "Admin password (min 8 chars)" "" 1
 done
 ok "Admin user: $ADMIN_USER"
 
 # ─── 4. SmartOLT connection ────────────────────────────────────────────────────
-step "4/7  SmartOLT tenant connection"
-ask OLT_BASE_URL "Tenant base URL"   "https://my-tenant.smartolt.com"
+step "4/8  SmartOLT tenant connection"
+if ! read_input OLT_BASE_URL "Tenant base URL" "https://my-tenant.smartolt.com"; then
+  die "Tenant base URL is required."
+fi
 case "$OLT_BASE_URL" in
   https://*.smartolt.com|https://*.smartolt.net) ;;
-  https://*)  warn "URL doesn't look like a SmartOLT subdomain — continuing anyway.";;
-  *)          err "URL must start with https://"; exit 1;;
+  https://*)  warn "URL doesn't look like a SmartOLT subdomain (.com/.net) — continuing anyway.";;
+  *)          die "URL must start with https://";;
 esac
-ask OLT_API_KEY "SmartOLT API key" "" 1
+if ! read_input OLT_API_KEY "SmartOLT API key" "" "secret"; then
+  die "SmartOLT API key is required."
+fi
 ok "Tenant: $OLT_BASE_URL"
 
 # ─── 5. scheduler window ───────────────────────────────────────────────────────
-step "5/7  Scheduler window"
-ask_yn USE_BOGOTA "Use America/Bogota timezone?" "Y"
+step "5/8  Scheduler window"
+
+if ! read_yn USE_BOGOTA "Use America/Bogota timezone?" "Y"; then
+  die "Aborted by user."
+fi
 if [[ "$USE_BOGOTA" == "y" ]]; then
   TZ_NAME="America/Bogota"
 else
-  ask TZ_NAME "IANA timezone (e.g. America/Mexico_City)" "America/Bogota"
+  if ! read_input TZ_NAME "IANA timezone (e.g. America/Mexico_City)" "America/Bogota"; then
+    die "Timezone is required."
+  fi
 fi
-ask SCHED_HOUR_START "Window START hour (0-23, integer)" "2"
-ask SCHED_HOUR_END   "Window END hour   (0-23, integer)" "3"
-if ! [[ "$SCHED_HOUR_START" =~ ^[0-9]+$ && "$SCHED_HOUR_END" =~ ^[0-9]+$ ]]; then
-  err "Hours must be integers."
-  exit 1
+
+if ! read_int SCHED_HOUR_START "Window START hour" 0 23 "2"; then
+  die "Window start hour is required."
+fi
+if ! read_int SCHED_HOUR_END "Window END hour" 0 23 "3"; then
+  die "Window end hour is required."
 fi
 if (( SCHED_HOUR_END <= SCHED_HOUR_START )); then
-  err "End hour must be GREATER than start hour (no midnight crossing in MVP)."
-  exit 1
+  die "End hour ($SCHED_HOUR_END) must be greater than start hour ($SCHED_HOUR_START). (No midnight crossing in MVP.)"
 fi
-ok "Window: ${SCHED_HOUR_START}:00 to ${SCHED_HOUR_END}:00 ($TZ_NAME)"
+ok "Window: $(printf '%02d:00' "$SCHED_HOUR_START") to $(printf '%02d:00' "$SCHED_HOUR_END") ($TZ_NAME)"
 
 # ─── 6. public access (HTTPS) ──────────────────────────────────────────────────
-step "6/7  Public access / HTTPS"
-ask_yn ENABLE_SSL "Expose the dashboard to the internet with HTTPS?" "N"
-ENABLE_SSL_ANS="$ENABLE_SSL"
+step "6/8  Public access / HTTPS"
+ENABLE_SSL="n"
+if ! read_yn ENABLE_SSL "Expose the dashboard to the internet with HTTPS?" "N"; then
+  die "Aborted by user."
+fi
+
 PUBLIC_DOMAIN=""
 ADMIN_EMAIL=""
 if [[ "$ENABLE_SSL" == "y" ]]; then
-  ask PUBLIC_DOMAIN "Public domain (e.g. panel.example.com)" ""
-  ask ADMIN_EMAIL   "Email for Let's Encrypt notifications"  "admin@${PUBLIC_DOMAIN#*.}"
+  if ! read_input PUBLIC_DOMAIN "Public domain (e.g. panel.example.com)"; then
+    die "Public domain is required to enable HTTPS."
+  fi
+  # Strip a leading wildcard label if the user typed one.
+  PUBLIC_DOMAIN="${PUBLIC_DOMAIN#\*.}"
+  if ! read_input ADMIN_EMAIL "Email for Let's Encrypt notifications" "admin@${PUBLIC_DOMAIN#*.}"; then
+    die "Email is required to enable HTTPS."
+  fi
   ok "HTTPS will be enabled for $PUBLIC_DOMAIN after you issue a cert in the panel."
 else
   ok "HTTP only (default proxy ports 80/443)."
 fi
 
 # ─── 7. write & deploy ────────────────────────────────────────────────────────
-step "7/7  Generating configuration"
+step "7/8  Writing configuration"
 
 if [[ "$OVERWRITE_ENV" == "y" ]]; then
   cp -f .env.example .env
-  # Substitute values into the template.
-  sed -i.bak \
-    -e "s|^SMARTOLT_BASE_URL=.*|SMARTOLT_BASE_URL=${OLT_BASE_URL}|" \
-    -e "s|^SMARTOLT_API_KEY=.*|SMARTOLT_API_KEY=${OLT_API_KEY}|" \
-    -e "s|^SCHEDULER_TIMEZONE=.*|SCHEDULER_TIMEZONE=${TZ_NAME}|" \
-    -e "s|^SCHEDULER_HOUR_START=.*|SCHEDULER_HOUR_START=${SCHED_HOUR_START}|" \
-    -e "s|^SCHEDULER_HOUR_END=.*|SCHEDULER_HOUR_END=${SCHED_HOUR_END}|" \
-    -e "s|^TZ=.*|TZ=${TZ_NAME}|" \
-    -e "s|^INITIAL_ADMIN_USERNAME=.*|INITIAL_ADMIN_USERNAME=${ADMIN_USER}|" \
-    -e "s|^INITIAL_ADMIN_PASSWORD=.*|INITIAL_ADMIN_PASSWORD=${ADMIN_PASSWORD}|" \
-    -e "s|^SMARTOLT_IMAGE=.*|SMARTOLT_IMAGE=${DOCKERHUB_NAMESPACE}/smartolt-automate:${DEFAULT_IMAGE_TAG}|" \
-    -e "s|^SMARTOLT_FRONTEND_IMAGE=.*|SMARTOLT_FRONTEND_IMAGE=${DOCKERHUB_NAMESPACE}/smartolt-automate-frontend:${DEFAULT_IMAGE_TAG}|" \
-    -e "s|^PROXY_IMAGE=.*|PROXY_IMAGE=${DOCKERHUB_NAMESPACE}/smartolt-automate-proxy:${DEFAULT_IMAGE_TAG}|" \
-    -e "s|^CERTBOT_IMAGE=.*|CERTBOT_IMAGE=${DOCKERHUB_NAMESPACE}/smartolt-automate-certbot:${DEFAULT_IMAGE_TAG}|" \
-    .env
-  rm -f .env.bak
-  ok ".env written"
+  ok "Copied .env.example -> .env"
 else
-  warn "Keeping existing .env"
+  ok "Keeping existing .env"
 fi
+
+# Always re-write the user-specific values, even if we kept the rest of .env.
+# This means re-running the wizard with new credentials updates them.
+env_set ".env" \
+  "SMARTOLT_BASE_URL"        "$OLT_BASE_URL" \
+  "SMARTOLT_API_KEY"          "$OLT_API_KEY" \
+  "SCHEDULER_TIMEZONE"        "$TZ_NAME" \
+  "SCHEDULER_HOUR_START"      "$SCHED_HOUR_START" \
+  "SCHEDULER_HOUR_END"        "$SCHED_HOUR_END" \
+  "TZ"                        "$TZ_NAME" \
+  "INITIAL_ADMIN_USERNAME"    "$ADMIN_USER" \
+  "INITIAL_ADMIN_PASSWORD"    "$ADMIN_PASSWORD" \
+  "SMARTOLT_IMAGE"            "${DOCKERHUB_NAMESPACE}/smartolt-automate:${DEFAULT_IMAGE_TAG}" \
+  "SMARTOLT_FRONTEND_IMAGE"   "${DOCKERHUB_NAMESPACE}/smartolt-automate-frontend:${DEFAULT_IMAGE_TAG}" \
+  "PROXY_IMAGE"               "${DOCKERHUB_NAMESPACE}/smartolt-automate-proxy:${DEFAULT_IMAGE_TAG}" \
+  "CERTBOT_IMAGE"             "${DOCKERHUB_NAMESPACE}/smartolt-automate-certbot:${DEFAULT_IMAGE_TAG}"
+ok "Wrote wizard values to .env"
 
 mkdir -p configs
 if [[ ! -f "configs/olts.yaml" ]]; then
@@ -274,62 +476,76 @@ if [[ ! -f "configs/olts.yaml" ]]; then
     cp -f configs/olts.example.yaml configs/olts.yaml
     ok "configs/olts.yaml created from template"
   else
-    warn "No configs/olts.yaml template shipped. You'll need to create one before enabling OLTs."
+    warn "No configs/olts.example.yaml template shipped; you will need to create configs/olts.yaml before enabling OLTs."
   fi
 fi
 
-ask_yn DO_PULL "Run 'docker compose pull' now?" "Y"
-if [[ "$DO_PULL" == "y" ]]; then
-  docker compose pull
-fi
+step "8/8  Bringing up the stack"
 
-ask_yn DO_UP "Bring the stack up with 'docker compose up -d'?" "Y"
-if [[ "$DO_UP" == "y" ]]; then
-  docker compose up -d
+if ! docker compose pull; then
+  die "docker compose pull failed. Check 'docker compose config' and your network."
 fi
+ok "Images pulled"
+
+if ! docker compose up -d; then
+  die "docker compose up -d failed. Inspect 'docker compose logs' for details."
+fi
+ok "Stack started"
 
 # ─── healthcheck ──────────────────────────────────────────────────────────────
-step "Verifying healthchecks"
-sleep 5
-docker compose ps
 echo ""
-printf "  Probing /api/service/livez ...\n"
+step "Verifying healthchecks"
 HEALTH_URL="http://localhost/api/service/livez"
-for i in 1 2 3 4 5 6 7 8 9 10; do
-  if curl -sSf -o /dev/null --max-time 4 "$HEALTH_URL"; then
+printf "  Probing %s ...\n" "$HEALTH_URL"
+up=0
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+  if curl --silent --show-error --fail --output /dev/null \
+       --connect-timeout 2 --max-time 4 "$HEALTH_URL"; then
+    up=1
     ok "Service reachable at $HEALTH_URL"
     break
   fi
+  printf "  ... retry %d/15\n" "$i"
   sleep 3
 done
+
+docker compose ps
+echo ""
 
 # ─── summary ──────────────────────────────────────────────────────────────────
 cat <<EOF
 
-${BOLD}Done.${NC}
+${C_BOLD}Done.${C_NC}
 
-  Dashboard:      ${BLUE}http://localhost/${NC}
-  API health:     ${BLUE}${HEALTH_URL}${NC}
-  Admin login:    ${BOLD}${ADMIN_USER}${NC} / (the password you set)
+  Dashboard:      ${C_BLUE}http://localhost/${C_NC}
+  API health:     ${C_BLUE}${HEALTH_URL}${C_NC}
+  Admin user:     ${C_BOLD}${ADMIN_USER}${C_NC}  (the password you set; not shown again)
 
-${BOLD}Next steps:${NC}
-  - Open ${BLUE}http://localhost/${NC} and log in.
-  - Go to ${BOLD}Configuración → Conexión SmartOLT${NC} — the values you provided
-    here are the initial bootstrap; the panel is the source of truth after.
-  $(
-    if [[ "$ENABLE_SSL_ANS" == "y" ]]; then
-      printf "%s\n" \
-        "- Go to ${BOLD}Configuración → Acceso público${NC}, pick your DNS provider,"
-      printf "%s\n" \
-        "  fill in its credentials, and issue the certificate."
-    fi
-  )
-  - Add OLTs by editing ${BOLD}configs/olts.yaml${NC} (or via the panel when ready).
-
-${BOLD}Re-running:${NC}
-  ./scripts/install.sh             # re-run wizard (preserves data/)
-  ./scripts/stack.sh status        # show status + URLs
-  ./scripts/stack.sh logs web      # tail logs
-  ./scripts/stack.sh upgrade       # pull new images + up -d
-  ./scripts/stack.sh down          # stop the stack
+${C_BOLD}Next steps:${C_NC}
+  - Open ${C_BLUE}http://localhost/${C_NC} and log in.
+  - Go to ${C_BOLD}Configuración → Conexión SmartOLT${C_NC}. The values you provided here
+    are the initial bootstrap; the panel is the source of truth after.
 EOF
+if [[ "$ENABLE_SSL" == "y" ]]; then
+  cat <<EOF
+  - Go to ${C_BOLD}Configuración → Acceso público${C_NC}, pick your DNS provider,
+    fill in its credentials, and issue the certificate.
+EOF
+fi
+cat <<EOF
+  - Add OLTs by editing ${C_BOLD}configs/olts.yaml${C_NC} (or via the panel).
+
+${C_BOLD}Re-running:${C_NC}
+  ./scripts/install.sh            # re-run wizard (preserves data/, asks before overwriting .env)
+  ./scripts/stack.sh status       # container status + healthcheck URLs
+  ./scripts/stack.sh logs web     # tail logs of a service
+  ./scripts/upgrade.sh --check    # check for new versions on Docker Hub
+  ./scripts/stack.sh down         # stop the stack (keeps data)
+
+EOF
+
+if [[ $up -ne 1 ]]; then
+  warn "Healthcheck did not respond within the timeout. Run './scripts/stack.sh logs web' to debug."
+  exit 2
+fi
+exit 0
