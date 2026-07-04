@@ -64,18 +64,34 @@ die()  { err "$*"; exit 1; }
 
 # ─── detect invocation mode ──────────────────────────────────────────────────
 #
-# We support two ways to invoke this script:
-#   1. 'curl ... | bash'  — $0 is 'bash' and BASH_SOURCE[0] is unset.
-#      We don't have access to the rest of the repo, so we fetch the
-#      required files from raw.githubusercontent.com into a tempdir.
-#   2. './scripts/install.sh' from a clone — $0 is a real path, we
-#      chdir to the repo root and use the local files.
+# Three invocation modes:
+#   1. 'curl ... | bash'  — no local files. We git-clone the installer
+#      repo into $HOME/.smartolt-automate-installer (or git pull if
+#      it already exists). The clone is used to fetch the source of
+#      truth for the wizard; the stack (docker-compose.yml, .env,
+#      configs/, data/, logs/) is created in the cwd where the user
+#      invoked curl, so they keep ownership of the deployment.
+#   2. './scripts/install.sh' from a clone (e.g. /opt/smartolt-automate)
+#      — use the local directory as-is for both the installer and
+#      the stack. This is the "production" mode after a one-time
+#      clone.
+#   3. 'bash <(curl ...)' or similar — same as #1.
 #
-# The detection must work even when set -u would be active (we don't use it,
-# but defensive code is cheap).
+# The detection must work even when set -u would be active (we don't use
+# it, but defensive code is cheap).
 SCRIPT_PATH="${BASH_SOURCE[0]:-}"
 [[ -z "$SCRIPT_PATH" || "$SCRIPT_PATH" == "bash" || ! -f "$SCRIPT_PATH" ]] \
   && INVOCATION="piped" || INVOCATION="local"
+
+# In piped mode we clone into this persistent dir, not a tempdir, so
+# subsequent runs (and 'git pull' for updates) work without re-cloning.
+INSTALLER_HOME_DEFAULT="${HOME}/.smartolt-automate-installer"
+INSTALLER_HOME="${SMARTOLT_INSTALLER_HOME:-$INSTALLER_HOME_DEFAULT}"
+
+# In piped mode the stack is set up in the cwd the user invoked us from,
+# not inside the installer clone. Remember that path so we can come back
+# to it after the clone.
+ORIG_CWD=""
 
 TMPDIR_INSTALL=""
 cleanup() {
@@ -89,28 +105,68 @@ trap cleanup EXIT INT TERM
 
 # ─── bootstrap: get into a directory with all the repo files ─────────────────
 if [[ "$INVOCATION" == "piped" ]]; then
+  ORIG_CWD="$(pwd)"
   REPO_OWNER="${SMARTOLT_INSTALLER_REPO_OWNER:-$REPO_OWNER_DEFAULT}"
   REPO_NAME="${SMARTOLT_INSTALLER_REPO_NAME:-$REPO_NAME_DEFAULT}"
   REPO_REF="${SMARTOLT_INSTALLER_REPO_REF:-$REPO_REF_DEFAULT}"
-  RAW_BASE="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_REF}"
+  CLONE_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}.git"
 
-  TMPDIR_INSTALL="$(mktemp -d -t smartolt-install-XXXXXX)" \
-    || die "Could not create a temp directory."
+  if [[ -d "$INSTALLER_HOME/.git" ]]; then
+    step "0/8  Updating existing installer"
+    printf "    Location: %s\n" "$INSTALLER_HOME"
+    if ! (cd "$INSTALLER_HOME" && git fetch --tags --prune origin >/dev/null 2>&1); then
+      die "Failed to fetch updates from $CLONE_URL"
+    fi
+    # If we're pinned to a specific ref (tag/branch), check it out.
+    # Otherwise do a fast-forward pull of whatever local branch is checked out.
+    if [[ "$REPO_REF" != "main" && "$REPO_REF" != "master" ]]; then
+      if ! (cd "$INSTALLER_HOME" && git checkout "$REPO_REF" >/dev/null 2>&1); then
+        die "Failed to check out $REPO_REF in $INSTALLER_HOME"
+      fi
+      ok "Checked out $REPO_REF"
+    else
+      if (cd "$INSTALLER_HOME" && git pull --ff-only >/dev/null 2>&1); then
+        ok "Pulled latest"
+      else
+        warn "git pull --ff-only failed; using whatever is checked out"
+      fi
+    fi
+  else
+    # If a stale non-git directory exists at that path, refuse to clobber it.
+    if [[ -e "$INSTALLER_HOME" ]]; then
+      die "Path $INSTALLER_HOME exists but is not a git repo. Remove it, or set SMARTOLT_INSTALLER_HOME elsewhere."
+    fi
+    step "0/8  Cloning installer"
+    printf "    Source:  %s\n" "$CLONE_URL"
+    printf "    Target:  %s\n" "$INSTALLER_HOME"
+    if ! command -v git >/dev/null 2>&1; then
+      die "git is required for 'curl | bash' installation. Install git, or clone the repo manually and run ./scripts/install.sh."
+    fi
+    if ! git clone --depth 1 --branch "$REPO_REF" "$CLONE_URL" "$INSTALLER_HOME" 2>&1 | tail -3; then
+      die "git clone failed. Check that $CLONE_URL is reachable and that $REPO_REF exists."
+    fi
+    ok "Cloned"
+  fi
+  export SMARTOLT_INSTALLER_HOME="$INSTALLER_HOME"
 
-  step "0/8  Fetching installer assets"
-  printf "    Repository: %s/%s@%s\n" "$REPO_OWNER" "$REPO_NAME" "$REPO_REF"
-  printf "    URL:        %s\n" "$RAW_BASE"
+  # Copy the wizard's working files (the source of truth for the stack)
+  # to the user's cwd. The installer clone stays pristine in $HOME for
+  # future 'git pull' updates; the stack lives where the user invoked us.
+  step "0/8  Copying stack files to $ORIG_CWD"
   for f in "${REQUIRED_FILES[@]}"; do
-    mkdir -p "$TMPDIR_INSTALL/$(dirname "$f")"
-    if ! curl --fail --silent --show-error --location \
-         --connect-timeout 10 --max-time 60 \
-         "$RAW_BASE/$f" -o "$TMPDIR_INSTALL/$f"; then
-      die "Failed to fetch $f from $RAW_BASE/$f"
+    target="$ORIG_CWD/$f"
+    if [[ -e "$target" ]]; then
+      # Don't clobber existing user state (.env, configs/, etc.).
+      : # leave it alone
+    else
+      mkdir -p "$(dirname "$target")"
+      cp -f "$INSTALLER_HOME/$f" "$target"
     fi
   done
-  chmod +x "$TMPDIR_INSTALL/scripts/stack.sh" "$TMPDIR_INSTALL/scripts/upgrade.sh"
-  cd "$TMPDIR_INSTALL"
-  ok "Assets ready"
+  ok "Stack files ready in $ORIG_CWD"
+
+  # Run the rest of the wizard from the user's cwd.
+  cd "$ORIG_CWD"
 else
   SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
   cd "$SCRIPT_DIR/.."
@@ -516,6 +572,11 @@ echo ""
 cat <<EOF
 
 ${C_BOLD}Done.${C_NC}
+EOF
+if [[ "$INVOCATION" == "piped" ]]; then
+  printf "  Installer:     ${C_BLUE}%s${C_NC}  (cloned; ${C_BOLD}cd${C_NC} here to re-run)\n\n" "$(pwd)"
+fi
+cat <<EOF
 
   Dashboard:      ${C_BLUE}http://localhost/${C_NC}
   API health:     ${C_BLUE}${HEALTH_URL}${C_NC}
@@ -536,11 +597,13 @@ cat <<EOF
   - Add OLTs by editing ${C_BOLD}configs/olts.yaml${C_NC} (or via the panel).
 
 ${C_BOLD}Re-running:${C_NC}
+  cd "$(pwd)"
   ./scripts/install.sh            # re-run wizard (preserves data/, asks before overwriting .env)
   ./scripts/stack.sh status       # container status + healthcheck URLs
   ./scripts/stack.sh logs web     # tail logs of a service
   ./scripts/upgrade.sh --check    # check for new versions on Docker Hub
   ./scripts/stack.sh down         # stop the stack (keeps data)
+  git pull                        # update the installer itself
 
 EOF
 
