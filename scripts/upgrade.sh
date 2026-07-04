@@ -366,6 +366,16 @@ trap cleanup_and_exit EXIT INT TERM
 ENV_BACKUP="$(mktemp -t upgrade-env-XXXXXX.bak)"
 cp -f .env "$ENV_BACKUP"
 
+# If the user is upgrading from a state that never had configs/olts.yaml
+# (e.g. they ran install.sh but skipped the OLT step, or the file was
+# deleted), the backend will refuse to start. Bootstrap from the template
+# if available. Never overwrite an existing file.
+mkdir -p configs
+if [[ ! -f "configs/olts.yaml" && -f "configs/olts.example.yaml" ]]; then
+  cp -f configs/olts.example.yaml configs/olts.yaml
+  ok "Bootstrapped configs/olts.yaml from template"
+fi
+
 # Build a list of (var, value) pairs and call env_set once.
 # env_set is defined inline so the script is self-contained.
 env_set() {
@@ -448,8 +458,21 @@ ROLLBACK_DONE=1
 rm -f "$ENV_BACKUP"
 ENV_BACKUP=""
 
-step "Recreating smartolt-automate and web"
-if ! docker compose up -d --force-recreate smartolt-automate web; then
+# Stop the old containers and remove them. We use `down` (not `stop`)
+# so docker compose can clean up networks too. --remove-orphans catches
+# any containers left over from a previous project name. We do this
+# before up so that --force-recreate doesn't fail with "container name
+# already in use" when COMPOSE_PROJECT_NAME has changed.
+step "Stopping existing stack"
+if ! docker compose down --remove-orphans; then
+  warn "docker compose down returned non-zero. Continuing anyway."
+fi
+
+step "Bringing stack back up"
+# `up -d` (no service arg) brings up everything in the compose file,
+# not just smartolt-automate + web. The latter would leave the proxy
+# and frontend down if they happened to be stopped.
+if ! docker compose up -d; then
   die "docker compose up -d failed. Inspect 'docker compose logs' for details."
 fi
 ok "Containers recreated"
