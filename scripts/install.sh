@@ -46,11 +46,33 @@ ask() {
   local var="$1" prompt="$2" default="${3:-}" secret="${4:-}"
   local reply
   local displayed_default="${default:-(required)}"
-  if [[ "$secret" == "1" ]]; then
-    read -r -s -p "$(printf "    %s [%s]: " "$prompt" "$displayed_default")" reply
-    printf "\n"
+
+  # When invoked via 'curl ... | bash', stdin is the script body, not the
+  # terminal. Reading from stdin would consume the rest of the script.
+  # Detect this and switch to /dev/tty so the user can actually type.
+  # We probe by trying to open /dev/tty on fd 3.
+  local tty_ok=0
+  if [[ ! -t 0 ]]; then
+    if { exec 3</dev/tty; } 2>/dev/null; then
+      tty_ok=1
+      exec 3<&-
+    fi
+  fi
+
+  if [[ "$tty_ok" == "1" ]]; then
+    if [[ "$secret" == "1" ]]; then
+      read -r -s -p "$(printf "    %s [%s]: " "$prompt" "$displayed_default")" reply </dev/tty
+      printf "\n"
+    else
+      read -r -p "$(printf "    %s [%s]: " "$prompt" "$displayed_default")" reply </dev/tty
+    fi
   else
-    read -r -p "$(printf "    %s [%s]: " "$prompt" "$displayed_default")" reply
+    if [[ "$secret" == "1" ]]; then
+      read -r -s -p "$(printf "    %s [%s]: " "$prompt" "$displayed_default")" reply
+      printf "\n"
+    else
+      read -r -p "$(printf "    %s [%s]: " "$prompt" "$displayed_default")" reply
+    fi
   fi
   reply="${reply:-$default}"
   if [[ -z "$reply" ]]; then
@@ -63,7 +85,20 @@ ask() {
 ask_yn() {
   local var="$1" prompt="$2" default="${3:-Y}"
   local reply
-  read -r -p "$(printf "    %s [Y/n]: " "$prompt")" reply
+
+  local tty_ok=0
+  if [[ ! -t 0 ]]; then
+    if { exec 3</dev/tty; } 2>/dev/null; then
+      tty_ok=1
+      exec 3<&-
+    fi
+  fi
+
+  if [[ "$tty_ok" == "1" ]]; then
+    read -r -p "$(printf "    %s [Y/n]: " "$prompt")" reply </dev/tty
+  else
+    read -r -p "$(printf "    %s [Y/n]: " "$prompt")" reply
+  fi
   reply="${reply:-$default}"
   if [[ "$reply" =~ ^[Yy]$ ]]; then
     printf -v "$var" 'y'
