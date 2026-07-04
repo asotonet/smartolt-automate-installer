@@ -23,7 +23,7 @@ set -eo pipefail
 readonly REPO_OWNER_DEFAULT="asotonet"
 readonly REPO_NAME_DEFAULT="smartolt-automate-installer"
 readonly REPO_REF_DEFAULT="main"
-readonly DEFAULT_IMAGE_TAG_DEFAULT="v0.2.0"
+readonly DEFAULT_IMAGE_TAG_DEFAULT="v0.2.1"
 readonly DOCKERHUB_NAMESPACE_DEFAULT="asoton"
 readonly COMPOSE_PROJECT_NAME_DEFAULT="smartolt_api_automate"
 
@@ -142,8 +142,18 @@ if [[ "$INVOCATION" == "piped" ]]; then
     if ! command -v git >/dev/null 2>&1; then
       die "git is required for 'curl | bash' installation. Install git, or clone the repo manually and run ./scripts/install.sh."
     fi
-    if ! git clone --depth 1 --branch "$REPO_REF" "$CLONE_URL" "$INSTALLER_HOME" 2>&1 | tail -3; then
-      die "git clone failed. Check that $CLONE_URL is reachable and that $REPO_REF exists."
+    if ! git clone --depth 1 "$CLONE_URL" "$INSTALLER_HOME" 2>&1 | tail -3; then
+      die "git clone failed. Check that $CLONE_URL is reachable."
+    fi
+    # If the user pinned a specific ref, check it out. (Doing this in two
+    # steps instead of 'git clone --branch' avoids a Git bug where
+    # 'clone --branch' fails when the URL has been rewritten via
+    # insteadOf to file:// or similar.)
+    if [[ "$REPO_REF" != "main" && "$REPO_REF" != "master" ]]; then
+      if ! (cd "$INSTALLER_HOME" && git checkout "$REPO_REF" >/dev/null 2>&1); then
+        die "Cloned OK but ref $REPO_REF does not exist on the remote."
+      fi
+      ok "Checked out $REPO_REF"
     fi
     ok "Cloned"
   fi
@@ -444,7 +454,7 @@ fi
 case "$OLT_BASE_URL" in
   https://*.smartolt.com|https://*.smartolt.net) ;;
   https://*)  warn "URL doesn't look like a SmartOLT subdomain (.com/.net) — continuing anyway.";;
-  *)          die "URL must start with https://";;
+  *)          die "URL must start with https://" ;;
 esac
 if ! read_input OLT_API_KEY "SmartOLT API key" "" "secret"; then
   die "SmartOLT API key is required."
