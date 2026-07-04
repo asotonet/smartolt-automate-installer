@@ -6,7 +6,7 @@
 # healthchecks, reverse-proxy, optional HTTPS.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/<owner>/smartolt-automate-installer/main/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/asotonet/smartolt-automate-installer/main/scripts/install.sh | bash
 #   # or, after cloning:
 #   ./scripts/install.sh
 #
@@ -21,26 +21,53 @@ else
   BOLD=""; GREEN=""; YELLOW=""; RED=""; BLUE=""; NC=""
 fi
 
-# When piped from curl, $0 is 'bash' and BASH_SOURCE[0] is unset. We tolerate that.
+# ─── bootstrap: detect invocation mode and fetch assets if needed ─────────────
+#
+# When invoked as 'curl ... | bash', we don't have access to .env.example,
+# docker-compose.yml, etc. We fetch the repo into a tempdir and chdir there.
+# When invoked as './scripts/install.sh' from a clone, we just use the local
+# directory.
+REPO_OWNER="${SMARTOLT_INSTALLER_REPO_OWNER:-asotonet}"
+REPO_NAME="${SMARTOLT_INSTALLER_REPO_NAME:-smartolt-automate-installer}"
+REPO_REF="${SMARTOLT_INSTALLER_REPO_REF:-main}"
+RAW_BASE="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_REF}"
+
 SCRIPT_PATH="${BASH_SOURCE[0]:-$0}"
-# Resolve script dir: works when invoked as a file; falls back to '.' when piped.
-if [[ -n "${SCRIPT_PATH}" && "${SCRIPT_PATH}" != "bash" && -f "${SCRIPT_PATH}" ]]; then
-  SCRIPT_DIR="$(cd "$(dirname "${SCRIPT_PATH}")" && pwd)"
-else
-  SCRIPT_DIR="$(pwd)"
+is_piped=0
+if [[ -z "${SCRIPT_PATH}" || "${SCRIPT_PATH}" == "bash" || ! -f "${SCRIPT_PATH}" ]]; then
+  is_piped=1
 fi
-ROOT="$(cd "$SCRIPT_DIR/.." 2>/dev/null && pwd || echo "$SCRIPT_DIR")"
-cd "$ROOT"
+
+if [[ "$is_piped" == "1" ]]; then
+  # Need to fetch the rest of the repo before we can do anything.
+  TMPDIR_INSTALL="$(mktemp -d -t smartolt-install-XXXXXX)"
+  trap 'rm -rf "$TMPDIR_INSTALL"' EXIT
+  printf "==> Fetching installer assets from %s/%s@%s ...\n" "$REPO_OWNER" "$REPO_NAME" "$REPO_REF"
+  for f in .env.example docker-compose.yml configs/olts.example.yaml scripts/stack.sh; do
+    mkdir -p "$TMPDIR_INSTALL/$(dirname "$f")"
+    if ! curl -fsSL "$RAW_BASE/$f" -o "$TMPDIR_INSTALL/$f"; then
+      printf "ERROR: failed to fetch %s\n" "$f" >&2
+      exit 1
+    fi
+  done
+  chmod +x "$TMPDIR_INSTALL/scripts/stack.sh"
+  cd "$TMPDIR_INSTALL"
+  printf "    \033[32m\u2713\033[0m Assets ready in %s\n" "$TMPDIR_INSTALL"
+else
+  SCRIPT_DIR="$(cd "$(dirname "${SCRIPT_PATH}")" && pwd)"
+  cd "$(cd "$SCRIPT_DIR/.." 2>/dev/null && pwd || echo "$SCRIPT_DIR")"
+fi
+
+# ─── output helpers ───────────────────────────────────────────────────────────
+step() { printf "\n${BLUE}==>${NC} ${BOLD}%s${NC}\n" "$1"; }
+ok()   { printf "    ${GREEN}\u2713${NC} %s\n" "$1"; }
+warn() { printf "    ${YELLOW}!${NC} %s\n" "$1"; }
+err()  { printf "    ${RED}\u2717${NC} %s\n" "$1"; }
 
 # ─── defaults ─────────────────────────────────────────────────────────────────
 DEFAULT_IMAGE_TAG="${SMARTOLT_IMAGE_TAG:-v0.2.0}"
 DOCKERHUB_NAMESPACE="${DOCKERHUB_NAMESPACE:-asoton}"
 COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-smartolt_api_automate}"
-
-step() { printf "\n${BLUE}==>${NC} ${BOLD}%s${NC}\n" "$1"; }
-ok()   { printf "    ${GREEN}\u2713${NC} %s\n" "$1"; }
-warn() { printf "    ${YELLOW}!${NC} %s\n" "$1"; }
-err()  { printf "    ${RED}\u2717${NC} %s\n" "$1"; }
 
 ask() {
   local var="$1" prompt="$2" default="${3:-}" secret="${4:-}"
