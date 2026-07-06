@@ -5,6 +5,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-07-06
+
+### Changed
+- Default image tag is now `v0.2.5` (was `v0.2.3`). v0.2.5 makes the
+  SmartOLT connection optional at boot: the service starts in
+  'unconfigured' mode and the admin sets the tenant URL + API token
+  from the panel. The backend picks up the change via a 2-second
+  mtime poll on `configs/global.yaml`. No need to set
+  `SMARTOLT_BASE_URL` / `SMARTOLT_API_KEY` in `.env` before deploying.
+
 ## [0.2.9] — 2026-07-06
 
 ### Changed
