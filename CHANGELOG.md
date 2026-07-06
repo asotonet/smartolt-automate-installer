@@ -5,6 +5,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.9] — 2026-07-06
+
+### Changed
+- Default image tag is now `v0.2.3` (was `v0.2.2`). v0.2.3 fixes a
+  silent failure where the entrypoint was running as the `app` user
+  instead of `root`, so the `chown -R app:app /app/configs` never
+  took effect. Bind-mounted `./configs` owned by `root` on the host
+  stayed unwritable for the `app` user inside the container, so
+  `PUT /api/config/olts` still failed with `Permission denied` even
+  on `v0.2.2`.
+
 ## [0.2.8] — 2026-07-05
 
 ### Changed

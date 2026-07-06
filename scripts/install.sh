@@ -23,7 +23,7 @@ set -eo pipefail
 readonly REPO_OWNER_DEFAULT="asotonet"
 readonly REPO_NAME_DEFAULT="smartolt-automate-installer"
 readonly REPO_REF_DEFAULT="main"
-readonly DEFAULT_IMAGE_TAG_DEFAULT="v0.2.2"
+readonly DEFAULT_IMAGE_TAG_DEFAULT="v0.2.3"
 readonly DOCKERHUB_NAMESPACE_DEFAULT="asoton"
 readonly COMPOSE_PROJECT_NAME_DEFAULT="smartolt_api_automate"
 
