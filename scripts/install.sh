@@ -237,6 +237,12 @@ read_input() {
   fi
 
   reply="${reply:-$default}"
+  if [[ -z "$reply" && -z "$default" ]]; then
+    # No default, user pressed Enter with no input: caller gets empty
+    # string and decides whether to treat that as a skip or an error.
+    printf -v "$var_name" '%s' ""
+    return 0
+  fi
   if [[ -z "$reply" ]]; then
     err "A value is required."
     return 1
@@ -329,9 +335,10 @@ def quote_value(v: str) -> str:
     return '"' + "".join(out) + '"'
 
 def needs_quote(v: str) -> bool:
-    # Values that need quoting: empty, contain whitespace, '#', '=', '"', "'", etc.
+    # Values that need quoting: contain whitespace, '#', '=', '"', "'", etc.
+    # Empty strings are written as bare (KEY=), not as KEY="".
     if not v:
-        return True
+        return False
     if any(c in v for c in ' \t"\'#$&`\\'):
         return True
     if v.startswith(("-", "+", ".")):
@@ -434,32 +441,67 @@ if ! read_input ADMIN_USER "Admin username" "admin"; then
 fi
 
 ADMIN_PASSWORD=""
-while :; do
-  if ! read_input ADMIN_PASSWORD "Admin password (min 8 chars)" "" "secret"; then
-    die "Admin password is required."
-  fi
-  if [[ "${#ADMIN_PASSWORD}" -ge 8 ]]; then
-    break
-  fi
-  err "Password too short (min 8 characters)."
-  ADMIN_PASSWORD=""
-done
+ADMIN_PASSWORD_GENERATED=""
+if read_yn USE_DEFAULT_PW "Generate a random admin password (you'll see it once)?" "N"; then
+  # 20 chars, base64-ish, URL-safe. Must have at least 8 chars.
+  ADMIN_PASSWORD_GENERATED="$(head -c 18 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 20)"
+  ADMIN_PASSWORD="$ADMIN_PASSWORD_GENERATED"
+  ok "Generated a random password."
+else
+  while :; do
+    if ! read_input ADMIN_PASSWORD "Admin password (min 8 chars, Enter to keep blank)" "" "secret"; then
+      err "Admin password is required."
+      ADMIN_PASSWORD=""
+      continue
+    fi
+    if [[ -z "$ADMIN_PASSWORD" ]]; then
+      warn "Password is blank. The wizard will generate one for you."
+      ADMIN_PASSWORD_GENERATED="$(head -c 18 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 20)"
+      ADMIN_PASSWORD="$ADMIN_PASSWORD_GENERATED"
+      ok "Generated a random password."
+      break
+    fi
+    if [[ "${#ADMIN_PASSWORD}" -ge 8 ]]; then
+      break
+    fi
+    err "Password too short (min 8 characters)."
+    ADMIN_PASSWORD=""
+  done
+fi
 ok "Admin user: $ADMIN_USER"
 
-# ─── 4. SmartOLT connection ────────────────────────────────────────────────────
+# ─── 4. SmartOLT connection (optional, set later from panel) ─────────────────
 step "4/8  SmartOLT tenant connection"
-if ! read_input OLT_BASE_URL "Tenant base URL" "https://my-tenant.smartolt.com"; then
-  die "Tenant base URL is required."
+warn "SmartOLT URL and API key are optional. The service boots in"
+warn "'unconfigured' mode; you can paste them from the panel"
+warn "(Settings → SmartOLT connection) after first login."
+
+OLT_BASE_URL=""
+OLT_API_KEY=""
+if read_yn SET_SMARTOLT_NOW "Set SmartOLT now (otherwise: from panel later)?" "N"; then
+  if ! read_input OLT_BASE_URL "Tenant base URL (Enter to skip)" ""; then
+    warn "No URL — leaving blank."
+    OLT_BASE_URL=""
+  fi
+  if [[ -n "$OLT_BASE_URL" ]]; then
+    case "$OLT_BASE_URL" in
+      https://*.smartolt.com|https://*.smartolt.net) ;;
+      https://*)  warn "URL doesn't look like a SmartOLT subdomain (.com/.net) — continuing anyway.";;
+      *)          warn "URL must start with https://. Leaving blank."; OLT_BASE_URL="" ;;
+    esac
+  fi
+  if [[ -n "$OLT_BASE_URL" ]]; then
+    if ! read_input OLT_API_KEY "SmartOLT API key (Enter to skip)" "" "secret"; then
+      warn "No API key — leaving blank."
+      OLT_API_KEY=""
+    fi
+  fi
 fi
-case "$OLT_BASE_URL" in
-  https://*.smartolt.com|https://*.smartolt.net) ;;
-  https://*)  warn "URL doesn't look like a SmartOLT subdomain (.com/.net) — continuing anyway.";;
-  *)          die "URL must start with https://" ;;
-esac
-if ! read_input OLT_API_KEY "SmartOLT API key" "" "secret"; then
-  die "SmartOLT API key is required."
+if [[ -n "$OLT_BASE_URL" && -n "$OLT_API_KEY" ]]; then
+  ok "Tenant: $OLT_BASE_URL"
+else
+  ok "Tenant: (configure later from the panel)"
 fi
-ok "Tenant: $OLT_BASE_URL"
 
 # ─── 5. scheduler window ───────────────────────────────────────────────────────
 step "5/8  Scheduler window"
@@ -512,9 +554,14 @@ fi
 # ─── 7. write & deploy ────────────────────────────────────────────────────────
 step "7/8  Writing configuration"
 
-if [[ "$OVERWRITE_ENV" == "y" ]]; then
-  cp -f .env.example .env
-  ok "Copied .env.example -> .env"
+if [[ "$OVERWRITE_ENV" == "y" || ! -f ".env" ]]; then
+  if [[ -f ".env" ]]; then
+    cp -f .env.example .env
+    ok "Copied .env.example -> .env"
+  else
+    cp -f .env.example .env
+    ok "Created .env from .env.example"
+  fi
 else
   ok "Keeping existing .env"
 fi
@@ -590,13 +637,29 @@ cat <<EOF
 
   Dashboard:      ${C_BLUE}http://localhost/${C_NC}
   API health:     ${C_BLUE}${HEALTH_URL}${C_NC}
-  Admin user:     ${C_BOLD}${ADMIN_USER}${C_NC}  (the password you set; not shown again)
+EOF
+if [[ -n "$ADMIN_PASSWORD_GENERATED" ]]; then
+  printf "  Admin password: ${C_BOLD}%s${C_NC}  ${C_YELLOW}(generated — save it now!)${C_NC}\n" "$ADMIN_PASSWORD_GENERATED"
+else
+  printf "  Admin password: ${C_BOLD}(the one you set)${C_NC}\n"
+fi
 
 ${C_BOLD}Next steps:${C_NC}
   - Open ${C_BLUE}http://localhost/${C_NC} and log in.
-  - Go to ${C_BOLD}Configuración → Conexión SmartOLT${C_NC}. The values you provided here
-    are the initial bootstrap; the panel is the source of truth after.
 EOF
+if [[ -n "$OLT_BASE_URL" && -n "$OLT_API_KEY" ]]; then
+  cat <<EOF
+  - SmartOLT connection was set during the wizard. The scheduler will
+    pick up your OLTs on the next reload. Add OLTs by editing
+    ${C_BOLD}configs/olts.yaml${C_NC} or via the panel.
+EOF
+else
+  cat <<EOF
+  - Go to ${C_BOLD}Configuración → Conexión SmartOLT${C_NC} and paste your
+    tenant URL + API token. Until then the scheduler stays idle but
+    you can browse the panel freely.
+EOF
+fi
 if [[ "$ENABLE_SSL" == "y" ]]; then
   cat <<EOF
   - Go to ${C_BOLD}Configuración → Acceso público${C_NC}, pick your DNS provider,
