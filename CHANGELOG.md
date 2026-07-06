@@ -5,6 +5,58 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.8] — 2026-07-05
+
+### Changed
+- Default image tag is now `v0.2.2` (was `v0.2.1`). v0.2.2 includes the
+  container entrypoint that fixes `Permission denied` when the
+  bind-mounted `./configs` directory is owned by `root` on the host.
+
+## [0.2.7] — 2026-07-05
+
+### Fixed
+- `install.sh` default image tag and `.env.example` were still pointing
+  to `v0.2.0`, so a fresh install would pull the old images and miss
+  the bug fix (config_written_locally) and i18n work that shipped in
+  v0.2.1.
+
+## [0.2.6] — 2026-07-04
+
+### Added
+- `curl ... | bash` invocation now `git clone`s the installer into
+  `$HOME/.smartolt-automate-installer` and copies the wizard's
+  working files (compose template, .env.example, etc.) to the user's
+  cwd. The stack lives in the cwd; the installer stays in `$HOME` for
+  future `git pull` updates.
+
+## [0.2.5] — 2026-07-04
+
+### Fixed
+- `upgrade.sh`: bring up the full stack (not just `smartolt-automate
+  + web`) so the proxy, frontend, and certbot come back after the
+  mandatory `docker compose down`. Also bootstrap `configs/olts.yaml`
+  from the template if missing, and `docker compose down
+  --remove-orphans` before up to clear stale containers from a
+  different `COMPOSE_PROJECT_NAME`.
+
+## [0.2.4] — 2026-07-04
+
+### Fixed
+- `upgrade.sh` rewrite for robustness: atomic `.env` snapshot/rollback,
+  proper semver parse for prerelease filter, `--check` wins over
+  implicit 'tag implies apply', `--yes` for non-interactive apply, single
+  Python call for Docker Hub query.
+
+## [0.2.3] — 2026-07-04
+
+### Fixed
+- `install.sh` rewrite: env_set uses python-dotenv-compatible quoting
+  (handles single quotes, equals, dollar, etc.); bootstrap trap cleans
+  up on Ctrl+C; single TTY-probe path; integer / URL / non-empty
+  validation; healthcheck returns non-zero on failure.
+
+## [0.2.2] — 2026-07-04
+
 ### Added
 - `scripts/upgrade.sh` — detect new versions on Docker Hub and offer to upgrade.
   - `scripts/upgrade.sh --check` — non-destructive check.
