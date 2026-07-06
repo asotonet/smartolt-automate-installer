@@ -5,6 +5,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.2] — 2026-07-06
+
+### Changed
+- Default image tag is now `v0.2.6` (was `v0.2.5`). v0.2.6 fixes a bug
+  where the web tier was reading SmartOLT URL/key from env vars
+  (loaded once at startup) instead of from the runtime registry.
+  After configuring SmartOLT from the panel, the next
+  `GET /api/olts` call was hitting `''` as base URL and httpx was
+  raising 'Request URL is missing http:// protocol'.
+
 ## [0.3.0] — 2026-07-06
 
 ### Changed
