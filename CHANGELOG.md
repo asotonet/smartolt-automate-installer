@@ -14,6 +14,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   shipped in earlier releases where one of the four images was
   forgotten.
 
+## [0.3.4] — 2026-07-06
+
+### Changed
+- Default image tag is now `v0.2.7` (was `v0.2.6`). v0.2.7 fixes a
+  bug where the panel reported "Certificate issued" after
+  `POST /api/admin/public-access/issue`, but the proxy kept serving
+  the HTTP-only Caddyfile from the original `PUT`. The HTTPS-enabled
+  Caddyfile was only being written to the web container's local
+  filesystem. Now it's pushed to the proxy container via
+  `docker compose exec` so HTTPS comes up immediately.
+
 ## [0.3.2] — 2026-07-06
 
 ### Changed
