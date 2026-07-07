@@ -52,6 +52,31 @@ When the wizard finishes you'll have:
 ./scripts/stack.sh restart  # restart a specific service
 ```
 
+## Publishing a new release
+
+`scripts/release.sh` tags and pushes all four images
+(`smartolt-automate`, `...-frontend`, `...-proxy`, `...-certbot`)
+to Docker Hub under one version. Idempotent: re-tagging an
+identical image deduplicates at the layer level.
+
+```bash
+# Tag + push with the version in .env
+./scripts/release.sh
+
+# Tag + push a specific version (e.g. for a release candidate)
+./scripts/release.sh v0.3.0
+
+# Verify a tag is live on Docker Hub (no push)
+./scripts/release.sh --check
+./scripts/release.sh --check v0.3.0
+```
+
+The script logs in via `~/.docker/config.json` (run `docker login -u asoton`
+first). Override with `DOCKERHUB_NAMESPACE=...` to push to a personal repo.
+
+It always updates `:latest` alongside the explicit version, so
+fresh installs that don't pin a tag still pull the latest stable.
+
 ## Configuration
 
 All configuration lives in `.env` (created by the wizard). Edit and re-run `./scripts/stack.sh upgrade` to apply image changes, or update values from the panel for runtime settings.

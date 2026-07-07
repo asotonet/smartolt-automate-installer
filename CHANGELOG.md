@@ -5,6 +5,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- `scripts/release.sh` — tag and push all four images (backend,
+  frontend, proxy, certbot) to Docker Hub in one shot. Auto-detects
+  the version from `.env` or `DEFAULT_IMAGE_TAG_DEFAULT` if not
+  passed. `--check` mode verifies a tag exists on Docker Hub
+  without pushing. Prevents the "missing one image" bug that
+  shipped in earlier releases where one of the four images was
+  forgotten.
+
 ## [0.3.2] — 2026-07-06
 
 ### Changed
