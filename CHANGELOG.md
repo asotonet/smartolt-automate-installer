@@ -5,6 +5,35 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-07-17
+
+### Changed
+- **Unified operator interface**: `scripts/install.sh`, `scripts/upgrade.sh`,
+  `scripts/stack.sh`, and `scripts/destroy.sh` are replaced by a single
+  `./smartolt.sh` with subcommands. Old script paths are kept as thin
+  wrappers that exec into `smartolt.sh` for backward compatibility (they
+  print a deprecation hint but otherwise work as before).
+
+### Subcommands
+
+```
+./smartolt.sh install [flags]    first-time deploy (wizard + pull + up)
+./smartolt.sh deploy              re-apply docker compose up -d
+./smartolt.sh status              container status + healthchecks
+./smartolt.sh logs [svc] [--no-follow]
+./smartolt.sh renew               force certbot renew (debug only)
+./smartolt.sh upgrade [ver]       pull new images, restart containers
+./smartolt.sh destroy [flags]     nuke everything the installer created
+```
+
+### Flags
+
+- `-y, --yes` — skip confirmation prompts
+- `--dry-run` — print the plan, change nothing
+- `--non-interactive` — install without prompts (env vars + defaults)
+- `--keep-images` / `--keep-certs` / `--keep-data` (destroy)
+- `--no-follow` — tail logs once and exit
+
 ## [0.3.9] — 2026-07-17
 
 ### Changed
