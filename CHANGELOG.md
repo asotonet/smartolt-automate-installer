@@ -5,6 +5,44 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **`.env.example` ships with safe, deployable defaults** — running
+  `./smartolt.sh install --yes` on a fresh clone, with **no env vars
+  set externally**, now produces a working 5-service stack. Previously
+  `.env.example` contained placeholders like `your-subdomain.smartolt.com`
+  and `replace-with-your-api-key` that would fail install validation
+  on first use.
+- **`smartolt.sh install --yes` implies `--non-interactive`** — `-y` no
+  longer just skips confirmation; it also forces the non-interactive path
+  so prompts never block in piped/cron invocations.
+- **`smartolt.sh install` auto-loads `.env` if present** so values you
+  edited in `.env` flow through to the wizard (and to subsequent
+  commands like `status` / `upgrade`).
+- **Admin password sentinel**: `INITIAL_ADMIN_PASSWORD=change-me-now` is
+  treated as a placeholder. If install runs non-interactive and finds
+  the sentinel (or empty), it auto-generates a 20-char random password
+  and prints it at the end of the run. Edit `.env` to pin a password.
+
+### Operator workflow
+
+The minimal install path is now:
+
+```bash
+git clone https://github.com/asotonet/smartolt-automate-installer
+cd smartolt-automate-installer
+./smartolt.sh install --yes
+# (admin password printed at the end — copy it before closing the shell)
+```
+
+If the operator wants to pre-configure the SmartOLT tenant and admin
+password, they can edit `.env` before install and re-run:
+
+```bash
+./smartolt.sh destroy -y
+sed -i 's|^INITIAL_ADMIN_PASSWORD=.*|INITIAL_ADMIN_PASSWORD=MyStrongPass!|' .env
+./smartolt.sh install --yes
+```
+
 ## [0.4.0] — 2026-07-17
 
 ### Changed

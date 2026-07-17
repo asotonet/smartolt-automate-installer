@@ -85,7 +85,7 @@ i=0
 while [[ $i -lt ${#parse_args[@]} ]]; do
   a="${parse_args[$i]}"
   case "$a" in
-    -y|--yes)         ASSUME_YES=1 ;;
+    -y|--yes)         ASSUME_YES=1; NONINTERACTIVE=1 ;;  # -y implies non-interactive
     --dry-run)        DRY_RUN=1 ;;
     --keep-images)    KEEP_IMAGES=1 ;;
     --keep-certs)     KEEP_CERTS=1 ;;
@@ -102,8 +102,20 @@ if [[ $NONINTERACTIVE -eq 0 && ! -t 0 && ! -r /dev/tty ]]; then
   NONINTERACTIVE=1
 fi
 
+# ─── load .env (if present) so config flows into our defaults ──────────────
+# We load only if .env exists (no error if it doesn't). Anything the
+# operator set explicitly in the shell still wins (the load uses no -u to
+# ignore already-set variables, except for a few we want to honor from
+# .env even when the shell has a value).
+if [[ -f .env ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source .env
+  set +a
+fi
+
 # ─── shared helpers ──────────────────────────────────────────────────────────
-DEFAULT_IMAGE_TAG="v0.3.3"
+DEFAULT_IMAGE_TAG="${SMARTOLT_IMAGE_TAG:-v0.3.3}"
 DOCKERHUB_NAMESPACE="${DOCKERHUB_NAMESPACE:-asoton}"
 COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-smartolt_api_automate}"
 export COMPOSE_PROJECT_NAME
@@ -175,8 +187,20 @@ cmd_install() {
 
   step "2/7  Inspecting state"
   OVERWRITE_ENV="${SMARTOLT_OVERWRITE_ENV:-}"
-  [[ -z "$OVERWRITE_ENV" && -f .env ]] && { warn ".env exists"; confirm || die "Aborted."; OVERWRITE_ENV="y"; }
+  if [[ -z "$OVERWRITE_ENV" && -f .env ]]; then
+    warn ".env exists; preserving it (set SMARTOLT_OVERWRITE_ENV=Y to overwrite)."
+    OVERWRITE_ENV="n"
+  fi
   [[ -z "$OVERWRITE_ENV" ]] && OVERWRITE_ENV="n"
+
+  # First-time install: copy .env.example to .env so all env-driven
+  # defaults are populated. The wizard then re-writes the user-specific
+  # values on top of this baseline.
+  if [[ ! -f .env ]]; then
+    [[ -f .env.example ]] || die "Missing .env.example in repo (cannot bootstrap .env)"
+    cp -f .env.example .env
+    ok "Bootstrapped .env from .env.example (with safe defaults)"
+  fi
 
   KEEP_DB="${SMARTOLT_KEEP_DB:-}"
   [[ -z "$KEEP_DB" && -f data/users.db ]] && { warn "data/users.db exists"; confirm || die "Aborted."; KEEP_DB="n"; }
@@ -190,22 +214,37 @@ cmd_install() {
   }
   ADMIN_PASSWORD=""
   ADMIN_PASSWORD_GENERATED=""
+
+  # Resolve admin password from, in order of priority:
+  #   1. SMARTOLT_ADMIN_PASSWORD env var (highest priority, used by CI)
+  #   2. INITIAL_ADMIN_PASSWORD from .env (the persistent setting)
+  #   3. The literal default "change-me-now" is a sentinel: in non-
+  #      interactive mode it triggers auto-generation. In interactive
+  #      mode it triggers a prompt.
   if [[ -n "${SMARTOLT_ADMIN_PASSWORD:-}" ]]; then
     (( ${#SMARTOLT_ADMIN_PASSWORD} >= 8 )) || die "SMARTOLT_ADMIN_PASSWORD must be at least 8 characters."
     ADMIN_PASSWORD="$SMARTOLT_ADMIN_PASSWORD"
+    ok "Admin password (from SMARTOLT_ADMIN_PASSWORD)."
+  elif [[ -n "${INITIAL_ADMIN_PASSWORD:-}" && "${INITIAL_ADMIN_PASSWORD}" != "change-me-now" ]]; then
+    (( ${#INITIAL_ADMIN_PASSWORD} >= 8 )) || die "INITIAL_ADMIN_PASSWORD in .env must be at least 8 characters."
+    ADMIN_PASSWORD="$INITIAL_ADMIN_PASSWORD"
+    ok "Admin password (from .env)."
   elif [[ $NONINTERACTIVE -eq 1 ]]; then
     ADMIN_PASSWORD_GENERATED="$(head -c 18 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 20)"
     ADMIN_PASSWORD="$ADMIN_PASSWORD_GENERATED"
-    ok "Generated random admin password."
+    ok "Generated random admin password (edit INITIAL_ADMIN_PASSWORD in .env to pin)."
   else
-    read -r -s -p "    Admin password (min 8 chars): " ADMIN_PASSWORD; printf "\n"
-    if [[ -z "$ADMIN_PASSWORD" ]]; then
-      ADMIN_PASSWORD_GENERATED="$(head -c 18 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 20)"
-      ADMIN_PASSWORD="$ADMIN_PASSWORD_GENERATED"
-      ok "Generated random admin password."
-    elif (( ${#ADMIN_PASSWORD} < 8 )); then
-      die "Password too short (min 8 characters)."
-    fi
+    while :; do
+      read -r -s -p "    Admin password (min 8 chars, Enter to generate): " ADMIN_PASSWORD; printf "\n"
+      if [[ -z "$ADMIN_PASSWORD" ]]; then
+        ADMIN_PASSWORD_GENERATED="$(head -c 18 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 20)"
+        ADMIN_PASSWORD="$ADMIN_PASSWORD_GENERATED"
+        ok "Generated random admin password."
+        break
+      fi
+      (( ${#ADMIN_PASSWORD} >= 8 )) && break
+      err "Password too short (min 8 characters)."
+    done
   fi
 
   step "4/7  SmartOLT connection"

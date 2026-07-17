@@ -17,15 +17,37 @@ This repository is **public** and contains no application source code. The full 
 
 ## Quick start
 
-```bash
-# Run the wizard (no clone required):
-curl -fsSL https://raw.githubusercontent.com/asotonet/smartolt-automate-installer/main/smartolt.sh | bash -s -- install
+The minimal install path — zero env vars required:
 
-# Or, if you prefer to clone first:
+```bash
 git clone https://github.com/asotonet/smartolt-automate-installer
 cd smartolt-automate-installer
 git checkout v0.4.0  # pin to a known-good installer version
-./smartolt.sh install
+./smartolt.sh install --yes
+```
+
+The first run prints an auto-generated admin password at the end — copy it
+before closing the shell. The stack is now running on `http://localhost/`.
+
+If you want to pre-configure the SmartOLT tenant URL/API key and a known
+admin password before installing, edit `.env` and re-run:
+
+```bash
+sed -i 's|^INITIAL_ADMIN_PASSWORD=.*|INITIAL_ADMIN_PASSWORD=MyStrongPass!|' .env
+# Optionally set SMARTOLT_BASE_URL and SMARTOLT_API_KEY in .env too.
+./smartolt.sh install --yes
+```
+
+`.env.example` ships with deployable defaults (Bogota TZ, image tag `v0.3.3`,
+scheduler window 02:00–03:00, etc.) — see that file for the full list of
+tunable parameters and their meanings.
+
+### Interactive wizard
+
+For a guided first-run that prompts for every value:
+
+```bash
+./smartolt.sh install    # no --yes: walks through every prompt
 ```
 
 The wizard will ask you for:
