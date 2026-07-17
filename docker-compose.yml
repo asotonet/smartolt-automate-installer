@@ -9,7 +9,7 @@
 
 services:
   smartolt-automate:
-    image: ${SMARTOLT_IMAGE:-asoton/smartolt-automate:v0.3.0}
+    image: ${SMARTOLT_IMAGE:-asoton/smartolt-automate:v0.3.1}
     pull_policy: ${PULL_POLICY:-always}
     container_name: smartolt-automate
     restart: unless-stopped
@@ -60,7 +60,7 @@ services:
       start_period: 15s
 
   web:
-    image: ${SMARTOLT_IMAGE:-asoton/smartolt-automate:v0.3.0}
+    image: ${SMARTOLT_IMAGE:-asoton/smartolt-automate:v0.3.1}
     pull_policy: ${PULL_POLICY:-always}
     container_name: smartolt-automate-web
     restart: unless-stopped
@@ -113,7 +113,7 @@ services:
       start_period: 20s
 
   frontend:
-    image: ${SMARTOLT_FRONTEND_IMAGE:-asoton/smartolt-automate-frontend:v0.3.0}
+    image: ${SMARTOLT_FRONTEND_IMAGE:-asoton/smartolt-automate-frontend:v0.3.1}
     pull_policy: ${PULL_POLICY:-always}
     container_name: smartolt-automate-frontend
     restart: unless-stopped
@@ -130,7 +130,7 @@ services:
       start_period: 10s
 
   proxy:
-    image: ${PROXY_IMAGE:-asoton/smartolt-automate-proxy:v0.3.0}
+    image: ${PROXY_IMAGE:-asoton/smartolt-automate-proxy:v0.3.3}
     pull_policy: ${PULL_POLICY:-always}
     container_name: smartolt-automate-proxy
     restart: unless-stopped
@@ -154,7 +154,7 @@ services:
       start_period: 10s
 
   certbot:
-    image: ${CERTBOT_IMAGE:-asoton/smartolt-automate-certbot:v0.3.0}
+    image: ${CERTBOT_IMAGE:-asoton/smartolt-automate-certbot:v0.3.1}
     pull_policy: ${PULL_POLICY:-always}
     container_name: smartolt-automate-certbot
     restart: unless-stopped

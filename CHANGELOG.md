@@ -5,6 +5,68 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.7] — 2026-07-17
+
+### Added
+- `scripts/destroy.sh` — precise teardown that removes ONLY artifacts the
+  installer created. Bounded scope:
+  - 5 containers with the canonical `smartolt-automate{-web,-frontend,-proxy,-certbot}`
+    names that `docker-compose.yml` pins via `container_name`.
+  - 7 named volumes matching `<project>_{logs,state,data,proxy_caddy,certbot_etc,certbot_work,certbot_logs}`.
+  - 1 default network per project.
+  - 4 images in the `asoton/` namespace only (`smartolt-automate{,,-frontend,-proxy,-certbot}`).
+  - Filesystem artifacts: `.env`, `configs/olts.yaml`, and the contents of
+    `./configs`, `./data`, `./logs`, `./state` — but **never** templates
+    (`*.example.*`, `*.example`) and **never** files outside those four
+    subdirectories.
+- Project name detection is robust: reads `COMPOSE_PROJECT_NAME` from
+  `.env`, falls back to the default, and additionally scans existing
+  installer volumes to discover projects whose `.env` is missing or stale.
+  Handles the case where a previous install crashed mid-write.
+- Flags: `--yes`/`-y` (skip confirmation), `--keep-images`,
+  `--keep-certs` (preserve the certbot volume), `--keep-data`
+  (preserve `data/`, `logs/`, `state/`).
+
+## [0.3.7] — 2026-07-17
+
+### Added
+- `scripts/destroy.sh` — precise teardown that removes ONLY artifacts the
+  installer created. Bounded scope:
+  - 5 containers with the canonical `smartolt-automate{-web,-frontend,-proxy,-certbot}`
+    names that `docker-compose.yml` pins via `container_name`.
+  - 7 named volumes matching `<project>_{logs,state,data,proxy_caddy,certbot_etc,certbot_work,certbot_logs}`.
+  - 1 default network per project.
+  - 4 images in the `asoton/` namespace only (`smartolt-automate{,,-frontend,-proxy,-certbot}`).
+  - Filesystem artifacts: `.env`, `configs/olts.yaml`, and the contents of
+    `./configs`, `./data`, `./logs`, `./state` — but **never** templates
+    (`*.example.*`, `*.example`) and **never** files outside those four
+    subdirectories.
+- Project name detection is robust: reads `COMPOSE_PROJECT_NAME` from
+  `.env`, falls back to the default, and additionally scans existing
+  installer volumes to discover projects whose `.env` is missing or stale.
+  Handles the case where a previous install crashed mid-write.
+- Flags: `--yes`/`-y` (skip confirmation), `--keep-images`,
+  `--keep-certs` (preserve the certbot volume), `--keep-data`
+  (preserve `data/`, `logs/`, `state/`).
+
+### Fixed
+- Healthcheck probe URL changed from `http://localhost/api/service/livez`
+  (which only works once Caddy is serving real HTTPS) to a primary +
+  fallback strategy: tries `http://localhost/api/service/livez` first,
+  then falls back to `http://localhost:8080/healthz` (the backend's
+  health endpoint, which is always exposed on the host). The install
+  succeeds even on fresh installs where no SSL cert has been issued.
+- Default image tag bumped to `v0.3.3`. v0.3.3 fixes:
+  - **SSL renewal timing**: `_ssl_renew_job` re-resolves `INTERNAL_API_TOKEN`
+    on every invocation (was cached at scheduler startup). The web tier
+    generates the token on first boot, which can happen **after** the
+    core's scheduler starts. Caching caused the first cron tick after
+    a fresh deploy to log `ssl_renew_skipped_no_internal_token`.
+  - **Internal API path corrected**: the call site now hits
+    `/api/admin/public-access/_internal/renew-now` (the actual route on
+    the public-access router, which has prefix `/api/admin/public-access`).
+    The previous `/api/internal/public-access/renew-now` returned 404.
+
 ## [0.3.6] — 2026-07-17
 
 ### Added

@@ -53,7 +53,7 @@ set -eo pipefail
 readonly REPO_OWNER_DEFAULT="asotonet"
 readonly REPO_NAME_DEFAULT="smartolt-automate-installer"
 readonly REPO_REF_DEFAULT="main"
-readonly DEFAULT_IMAGE_TAG_DEFAULT="v0.3.0"
+readonly DEFAULT_IMAGE_TAG_DEFAULT="v0.3.3"
 readonly DOCKERHUB_NAMESPACE_DEFAULT="asoton"
 readonly COMPOSE_PROJECT_NAME_DEFAULT="smartolt_api_automate"
 
@@ -236,8 +236,18 @@ else
 fi
 
 # After this point we MUST be in a directory that has all REQUIRED_FILES.
+# If we're running locally and a template was wiped (e.g. by destroy.sh),
+# re-copy it from the installer clone ($INSTALLER_HOME) before failing.
 for f in "${REQUIRED_FILES[@]}"; do
-  [[ -f "$f" ]] || die "Required file missing after bootstrap: $f"
+  if [[ ! -f "$f" ]]; then
+    if [[ -n "$INSTALLER_HOME" && -f "$INSTALLER_HOME/$f" ]]; then
+      mkdir -p "$(dirname "$f")"
+      cp -f "$INSTALLER_HOME/$f" "$f"
+      ok "Restored missing template $f from installer clone"
+    else
+      die "Required file missing after bootstrap: $f"
+    fi
+  fi
 done
 # Glob-expanded files must also exist (at least one match per glob).
 for g in "${REQUIRED_GLOBS[@]}"; do
@@ -857,17 +867,26 @@ fi
 # ─── healthcheck ──────────────────────────────────────────────────────────────
 echo ""
 HEALTH_URL="http://localhost/api/service/livez"
+HEALTH_URL_FALLBACK="http://localhost:8080/healthz"
 if [[ "$DRY_RUN" -eq 1 || "$SKIP_DEPLOY" -eq 1 ]]; then
   # Deploy was skipped; $up was already set to 1 above.
   :
 else
   step "Verifying healthchecks"
-  printf "  Probing %s ...\n" "$HEALTH_URL"
   for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
     if curl --silent --show-error --fail --output /dev/null \
          --connect-timeout 2 --max-time 4 "$HEALTH_URL"; then
       up=1
       ok "Service reachable at $HEALTH_URL"
+      break
+    fi
+    # Fallback for fresh installs where the proxy can't serve /api/* yet
+    # (no SSL cert, no domain) — try the backend's healthz directly.
+    if curl --silent --show-error --fail --output /dev/null \
+         --connect-timeout 2 --max-time 4 "$HEALTH_URL_FALLBACK"; then
+      up=1
+      ok "Service reachable at $HEALTH_URL_FALLBACK (proxy not serving yet — likely waiting for SSL cert)"
+      HEALTH_URL="$HEALTH_URL_FALLBACK"
       break
     fi
     printf "  ... retry %d/15\n" "$i"
