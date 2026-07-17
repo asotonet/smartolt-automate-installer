@@ -5,14 +5,48 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.5] — 2026-07-17
+
+### Changed
+- Default image tag is now `v0.3.0` (was `v0.2.7`). v0.3.0 of the upstream
+  app adds automatic Let's Encrypt renewal: the core scheduler runs
+  `certbot renew` twice a day (configurable via `SSL_RENEW_HOUR`) by
+  calling the web tier's `/api/internal/public-access/renew-now`
+  endpoint. The web container auto-generates `INTERNAL_API_TOKEN` on
+  first boot and persists it under `data/internal_token`; the core
+  reads the same file via the shared `./data` volume.
+- `docker-compose.yml` updated to match upstream: dropped
+  `PROXY_HTTP_PORT` (proxy is HTTPS-only), added new env vars
+  (`INTERNAL_API_TOKEN`, `INTERNAL_API_TOKEN_FILE`, `WEB_SERVICE_NAME`,
+  `WEB_INTERNAL_PORT`, `SSL_RENEW_HOUR`) on both `smartolt-automate`
+  and `web`, and mounts `./scripts/ssl` into the certbot container so
+  the DNS-01 hooks are available.
+
 ### Added
-- `scripts/release.sh` — tag and push all four images (backend,
-  frontend, proxy, certbot) to Docker Hub in one shot. Auto-detects
-  the version from `.env` or `DEFAULT_IMAGE_TAG_DEFAULT` if not
-  passed. `--check` mode verifies a tag exists on Docker Hub
-  without pushing. Prevents the "missing one image" bug that
-  shipped in earlier releases where one of the four images was
-  forgotten.
+- `scripts/ssl/dns-auth-hook.sh` and `scripts/ssl/dns-cleanup-hook.sh`
+  shipped with the installer (copied into the user's cwd by the wizard)
+  so manual DNS-01 provider works out of the box. `install.sh` now
+  glob-copies them via `REQUIRED_GLOBS`.
+- `.env.example` documents the new SSL renewal variables.
+
+### Notes
+- Operators already on a previous version don't need to re-run the wizard:
+  `./scripts/upgrade.sh --apply` will pull the new `v0.3.0` images and
+  start the SSL renewal cron automatically on the next schedule.
+- First boot after upgrade may take a few seconds longer than usual
+  while the web tier auto-generates the `INTERNAL_API_TOKEN` and writes
+  it to `data/internal_token` with mode `0600`.
+
+## [0.3.4] — 2026-07-06
+
+### Changed
+- Default image tag is now `v0.2.7` (was `v0.2.6`). v0.2.7 fixes a
+  bug where the panel reported "Certificate issued" after
+  `POST /api/admin/public-access/issue`, but the proxy kept serving
+  the HTTP-only Caddyfile from the original `PUT`. The HTTPS-enabled
+  Caddyfile was only being written to the web container's local
+  filesystem. Now it's pushed to the proxy container via
+  `docker compose exec` so HTTPS comes up immediately.
 
 ## [0.3.4] — 2026-07-06
 

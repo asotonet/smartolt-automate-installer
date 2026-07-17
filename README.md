@@ -22,7 +22,7 @@ curl -fsSL https://raw.githubusercontent.com/asotonet/smartolt-automate-installe
 # Or, if you prefer to clone first:
 git clone https://github.com/asotonet/smartolt-automate-installer
 cd smartolt-automate-installer
-git checkout v0.3.0  # pin to a known-good installer version
+git checkout v0.3.5  # pin to a known-good installer version
 ./scripts/install.sh
 ```
 
@@ -91,11 +91,13 @@ Key variables:
 | `SCHEDULER_TIMEZONE` | `America/Bogota` | IANA timezone |
 | `SCHEDULER_HOUR_START` / `_END` | `2` / `3` | Window as integer hours (UTC offset of the timezone) |
 | `PROXY_HTTP_PORT` / `PROXY_HTTPS_PORT` | `80` / `443` | Host ports for the reverse proxy |
-| `SMARTOLT_IMAGE` | `asoton/smartolt-automate:v0.2.7` | Backend + web tier image |
-| `SMARTOLT_FRONTEND_IMAGE` | `asoton/smartolt-automate-frontend:v0.2.7` | Frontend image |
-| `PROXY_IMAGE` | `asoton/smartolt-automate-proxy:v0.2.7` | Caddy image |
-| `CERTBOT_IMAGE` | `asoton/smartolt-automate-certbot:v0.2.7` | Certbot image (46 DNS plugins) |
+| `SMARTOLT_IMAGE` | `asoton/smartolt-automate:v0.3.0` | Backend + web tier image |
+| `SMARTOLT_FRONTEND_IMAGE` | `asoton/smartolt-automate-frontend:v0.3.0` | Frontend image |
+| `PROXY_IMAGE` | `asoton/smartolt-automate-proxy:v0.3.0` | Caddy image |
+| `CERTBOT_IMAGE` | `asoton/smartolt-automate-certbot:v0.3.0` | Certbot image (46 DNS plugins) |
 | `PULL_POLICY` | `always` | `always` pulls on every `up`; `missing`/`if_not_present` honours local cache |
+| `INTERNAL_API_TOKEN` | (auto-generated) | Shared secret between core scheduler and web tier for the SSL renewal cron. Auto-created by web on first boot and persisted to `data/internal_token`. Leave blank unless you want a fixed value. |
+| `SSL_RENEW_HOUR` | `3,15` | Hours of day when the core scheduler triggers `certbot renew`. Default: 03:00 and 15:00 in the scheduler timezone. |
 
 ## Architecture
 

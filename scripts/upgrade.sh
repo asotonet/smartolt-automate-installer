@@ -15,8 +15,8 @@
 #   scripts/upgrade.sh --apply    # apply the latest stable release
 #   scripts/upgrade.sh --apply --yes    # non-interactive apply
 #   scripts/upgrade.sh --pre      # include prereleases
-#   scripts/upgrade.sh v0.2.5     # upgrade to a specific tag
-#   scripts/upgrade.sh v0.2.5 --apply --yes   # non-interactive
+#   scripts/upgrade.sh v0.3.0     # upgrade to a specific tag
+#   scripts/upgrade.sh v0.3.0 --apply --yes   # non-interactive
 
 # No `set -u`: this script handles many empty/default values and we
 # prefer friendly errors over "unbound variable" tracebacks.
@@ -127,9 +127,9 @@ while [[ $# -gt 0 ]]; do
 done
 
 # A bare positional tag implies --apply unless --check was explicit.
-# `upgrade.sh v0.2.0`         -> apply
-# `upgrade.sh v0.2.0 --check` -> check
-# `upgrade.sh --check v0.2.0` -> check
+# `upgrade.sh v0.3.0`         -> apply
+# `upgrade.sh v0.3.0 --check` -> check
+# `upgrade.sh --check v0.3.0` -> check
 if [[ -n "$TARGET_TAG" && $HAS_APPLY_FLAG -eq 0 && $HAS_CHECK_FLAG -eq 0 ]]; then
   MODE="apply"
 fi
@@ -192,7 +192,7 @@ CURRENT_BACKEND="$(get_env_var SMARTOLT_IMAGE)"
 CURRENT_TAG="${CURRENT_BACKEND##*:}"
 if [[ -z "$CURRENT_TAG" || "$CURRENT_TAG" == "$CURRENT_BACKEND" ]]; then
   # Either no SMARTOLT_IMAGE in .env, or it's a digest (sha256:...).
-  CURRENT_TAG="v0.2.0"
+  CURRENT_TAG="v0.3.0"
 fi
 
 # ─── fetch remote tags from Docker Hub ───────────────────────────────────────
@@ -347,7 +347,7 @@ fi
 step "Updating .env to ${NEXT_TAG}"
 
 # Snapshot .env before we touch it so we can roll back if the pull
-# (or recreate) fails. A partial upgrade (env says v0.2.1 but only
+# (or recreate) fails. A partial upgrade (env says v0.3.1 but only
 # some images were pulled) leaves the stack in a broken state.
 ENV_BACKUP=""
 ROLLBACK_DONE=0

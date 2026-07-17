@@ -23,7 +23,7 @@ set -eo pipefail
 readonly REPO_OWNER_DEFAULT="asotonet"
 readonly REPO_NAME_DEFAULT="smartolt-automate-installer"
 readonly REPO_REF_DEFAULT="main"
-readonly DEFAULT_IMAGE_TAG_DEFAULT="v0.2.7"
+readonly DEFAULT_IMAGE_TAG_DEFAULT="v0.3.0"
 readonly DOCKERHUB_NAMESPACE_DEFAULT="asoton"
 readonly COMPOSE_PROJECT_NAME_DEFAULT="smartolt_api_automate"
 
@@ -35,6 +35,12 @@ readonly REQUIRED_FILES=(
   configs/olts.example.yaml
   scripts/stack.sh
   scripts/upgrade.sh
+)
+# Certbot DNS-01 hooks (manual provider). The certbot container reads them
+# from /scripts via the volume mount in docker-compose.yml. Glob-expanded
+# by the copy loop below.
+readonly REQUIRED_GLOBS=(
+  "scripts/ssl/*.sh"
 )
 
 # ─── output ──────────────────────────────────────────────────────────────────
@@ -173,6 +179,23 @@ if [[ "$INVOCATION" == "piped" ]]; then
       cp -f "$INSTALLER_HOME/$f" "$target"
     fi
   done
+  # Glob-expanded files (e.g. certbot DNS-01 hooks). Each match is copied
+  # to the same relative path under ORIG_CWD; existing files are left alone.
+  for g in "${REQUIRED_GLOBS[@]}"; do
+    # shellcheck disable=SC2086
+    for src in $INSTALLER_HOME/$g; do
+      [[ -f "$src" ]] || continue
+      rel="${src#$INSTALLER_HOME/}"
+      target="$ORIG_CWD/$rel"
+      if [[ -e "$target" ]]; then
+        :
+      else
+        mkdir -p "$(dirname "$target")"
+        cp -f "$src" "$target"
+        chmod +x "$target"
+      fi
+    done
+  done
   ok "Stack files ready in $ORIG_CWD"
 
   # Run the rest of the wizard from the user's cwd.
@@ -185,6 +208,18 @@ fi
 # After this point we MUST be in a directory that has all REQUIRED_FILES.
 for f in "${REQUIRED_FILES[@]}"; do
   [[ -f "$f" ]] || die "Required file missing after bootstrap: $f"
+done
+# Glob-expanded files must also exist (at least one match per glob).
+for g in "${REQUIRED_GLOBS[@]}"; do
+  # shellcheck disable=SC2086
+  found=0
+  for _ in $g; do
+    found=$((found + 1))
+    break
+  done
+  if (( found == 0 )); then
+    die "Required file missing after bootstrap: $g"
+  fi
 done
 
 # ─── defaults (can be overridden via env) ────────────────────────────────────
