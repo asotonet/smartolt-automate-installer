@@ -8,10 +8,18 @@
 # of the four was forgotten. This script makes that mistake impossible.
 #
 # Usage:
-#   scripts/release.sh                     # tag + push with the version from .env
-#   scripts/release.sh v0.3.0             # tag + push with explicit version
-#   scripts/release.sh --check            # verify the tag exists in Docker Hub
+#   scripts/release.sh                     # pull + tag + push with the version from .env
+#   scripts/release.sh v0.3.0             # pull + tag + push with explicit version
+#   scripts/release.sh v0.3.0 --skip-pull  # use whatever's already in the local cache
+#   scripts/release.sh --check            # verify the tag exists on Docker Hub
 #   scripts/release.sh --check v0.3.0     # verify a specific tag
+#
+# What it does (publish mode):
+#   1. Docker-pull all 4 images at the requested version from Docker Hub
+#      (so the script is fully self-contained — no need to run the
+#      upstream build first).
+#   2. Re-tag each as :latest and push both tags.
+#   3. Verify the tags are live on Docker Hub.
 #
 # Requires: docker, an authenticated `docker login` session against Docker Hub,
 # network access to registry-1.docker.io, python3 for the verification step.
@@ -84,7 +92,20 @@ declare -A IMAGE_BASENAME=(
   [CERTBOT_IMAGE]="smartolt-automate-certbot"
 )
 
-# Tag and push one image: IMAGE_TAG where IMAGE_TAG is a local image:tag.
+# docker pull a single image from Docker Hub. Refuses to publish if it
+# can't reach the registry (we don't want a silent "image exists locally
+# but on the wrong version" disaster).
+pull_image() {
+  local src_tag="$1"
+  if ! docker pull "$src_tag" 2>&1 | tail -3; then
+    err "docker pull failed for $src_tag"
+    return 1
+  fi
+  ok "pulled $src_tag"
+  return 0
+}
+
+# Tag and push one image. Assumes the image is already local.
 publish() {
   local src_tag="$1" dst_tag="$2" name="$3"
   if ! docker image inspect "$src_tag" >/dev/null 2>&1; then
@@ -149,9 +170,11 @@ fi
 # ─── args ──────────────────────────────────────────────────────────────────
 MODE="publish"
 TARGET_VERSION=""
+SKIP_PULL=0
 for arg in "$@"; do
   case "$arg" in
-    --check)  MODE="check" ;;
+    --check)        MODE="check" ;;
+    --skip-pull)    SKIP_PULL=1 ;;
     --help|-h)
       sed -n '2,18p' "$0"
       exit 0
@@ -160,9 +183,7 @@ for arg in "$@"; do
       [[ -z "$TARGET_VERSION" ]] || die "Multiple versions specified"
       TARGET_VERSION="$arg"
       ;;
-    *)
-      die "Unknown argument: $arg (try --help)"
-      ;;
+    *) die "Unknown argument: $arg (try --help)" ;;
   esac
 done
 
@@ -174,6 +195,14 @@ VERSION="$(get_version "$TARGET_VERSION")"
 step "Tagging plan"
 printf "    Namespace:  %s\n" "$NAMESPACE"
 printf "    Version:    %s\n" "$VERSION"
+printf "    Mode:       %s\n" "$MODE"
+if [[ "$MODE" == "publish" && $SKIP_PULL -eq 0 ]]; then
+  printf "    Strategy:   docker pull each image at :%s from Docker Hub,\n" "$VERSION"
+  printf "                retag as :latest, push both. Self-contained.\n"
+elif [[ "$MODE" == "publish" ]]; then
+  printf "    Strategy:   use whatever is already in the local cache\n"
+  printf "                (no docker pull). Use when you've built locally.\n"
+fi
 
 if [[ "$MODE" == "check" ]]; then
   echo
@@ -191,7 +220,27 @@ if [[ "$MODE" == "check" ]]; then
   exit $rc
 fi
 
-step "Tagging and pushing 4 images"
+# ─── 1. Pull the 4 images at :VERSION (publish mode only) ──────────────────
+# We always pull :VERSION. The :latest tag is overwritten in step 3
+# regardless of what we have locally.
+if [[ $SKIP_PULL -eq 0 ]]; then
+  step "1/3  Pulling 4 images at :$VERSION from Docker Hub"
+  pull_fail=0
+  for repo in smartolt-automate smartolt-automate-frontend smartolt-automate-proxy smartolt-automate-certbot; do
+    src="${NAMESPACE}/${repo}:${VERSION}"
+    if ! pull_image "$src"; then
+      pull_fail=$((pull_fail + 1))
+    fi
+  done
+  if (( pull_fail > 0 )); then
+    die "$pull_fail pull(s) failed. Aborting before any push."
+  fi
+else
+  warn "1/3  Skipping docker pull (--skip-pull). Using local cache."
+fi
+
+# ─── 2. Tag and push :VERSION and :latest ───────────────────────────────────
+step "2/3  Tagging and pushing 4 images"
 fail=0
 # Order matters: backend first, then frontend, then proxy, then certbot.
 # If something fails the remaining steps still run.
@@ -215,7 +264,8 @@ if (( fail > 0 )); then
   exit 1
 fi
 
-step "Verification"
+# ─── 3. Verify the tags are live on Docker Hub ──────────────────────────────
+step "3/3  Verification"
 rc=0
 for repo in smartolt-automate smartolt-automate-frontend smartolt-automate-proxy smartolt-automate-certbot; do
   if verify_remote_tag "$repo" "$VERSION"; then
@@ -227,7 +277,7 @@ for repo in smartolt-automate smartolt-automate-frontend smartolt-automate-proxy
 done
 
 if (( rc == 0 )); then
-  printf "\n%sDone.%s\n  Version %s published to asoton/{smartolt-automate,...}.\n" \
-    "$C_BOLD" "$C_NC" "$VERSION"
+  printf "\n%sDone.%s\n  Version %s published to %s/{smartolt-automate,...}.\n" \
+    "$C_BOLD" "$C_NC" "$VERSION" "$NAMESPACE"
 fi
 exit $rc

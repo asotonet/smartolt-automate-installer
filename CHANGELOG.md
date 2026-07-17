@@ -5,6 +5,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.9] — 2026-07-17
+
+### Changed
+- `scripts/release.sh` is now self-contained in publish mode: by default
+  it `docker pull`s the 4 images at the requested version from Docker Hub,
+  then retags as `:latest` and pushes both tags. Previously the script
+  required the images to already be present locally (often meaning you
+  had to run the upstream `Smartolt_API_Automate/scripts/release.sh`
+  build first on the same machine). The new flag `--skip-pull` opts out
+  of the pull step for the case where you've built the images locally
+  from source.
+- Plan section now prints the chosen strategy explicitly so operators
+  can see whether a pull will happen before it does.
+- Pull failures abort the script before any push (a partial publish
+  was previously possible if one of the 4 pulls failed mid-way).
+
+## [0.3.8] — 2026-07-17
+
+### Fixed
+- `scripts/destroy.sh`: avoid spurious `Failed to remove volume` log
+  entries for volumes that `docker compose down --remove-orphans` had
+  already removed. The script now re-checks existence inside the rm
+  loop and skips volumes that are already gone.
+
 ## [0.3.7] — 2026-07-17
 
 ### Added
