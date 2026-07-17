@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SmartOLT Automate installer — interactive wizard.
+# SmartOLT Automate installer — interactive and non-interactive wizard.
 #
 # Pulls four prebuilt images from Docker Hub (asoton/smartolt-automate, ...-frontend,
 # ...-proxy, ...-certbot) and brings them up as a 5-service compose stack with
@@ -9,6 +9,36 @@
 #   curl -fsSL https://raw.githubusercontent.com/asotonet/smartolt-automate-installer/main/scripts/install.sh | bash
 #   # or, after cloning:
 #   ./scripts/install.sh
+#
+# Non-interactive / automated usage:
+#   ./scripts/install.sh --yes                                # use defaults for everything
+#   SMARTOLT_ADMIN_USERNAME=ops \
+#   SMARTOLT_ADMIN_PASSWORD=secret \
+#   SMARTOLT_BASE_URL=https://tenant.smartolt.com \
+#   SMARTOLT_API_KEY=... \
+#   SMARTOLT_PUBLIC_DOMAIN=panel.example.com \
+#   ./scripts/install.sh --yes                                # fully unattended
+#
+#   SMARTOLT_INSTALL_SKIP_DEPLOY=1 ./scripts/install.sh --yes   # write files only, don't deploy
+#   SMARTOLT_INSTALL_DRY_RUN=1     ./scripts/install.sh --yes   # print plan, touch nothing
+#
+# Environment variables (all optional; sensible defaults are used):
+#   SMARTOLT_INSTALL_NONINTERACTIVE=1   same as --yes
+#   SMARTOLT_ADMIN_USERNAME             default: admin
+#   SMARTOLT_ADMIN_PASSWORD             default: random 20 chars (printed at end)
+#   SMARTOLT_BASE_URL                   SmartOLT tenant URL (deferred to panel if empty)
+#   SMARTOLT_API_KEY                    SmartOLT API key
+#   SMARTOLT_TIMEZONE                   IANA tz, default: America/Bogota
+#   SMARTOLT_HOUR_START                 0-23, default: 2
+#   SMARTOLT_HOUR_END                   0-23, default: 3
+#   SMARTOLT_PUBLIC_DOMAIN              enables HTTPS if set
+#   SMARTOLT_LETSENCRYPT_EMAIL          default: admin@<public_domain>
+#   SMARTOLT_OVERWRITE_ENV=Y|N          default: N (preserve existing .env)
+#   SMARTOLT_KEEP_DB=Y|N                default: Y (preserve existing data/)
+#   SMARTOLT_INSTALL_SKIP_DEPLOY=1      write files but don't deploy
+#   SMARTOLT_INSTALL_DRY_RUN=1          print plan only
+#   SMARTOLT_IMAGE_TAG                  default: v0.3.0
+#   DOCKERHUB_NAMESPACE                 default: asoton
 #
 # Re-runnable: existing .env and data/ are preserved unless explicitly overwritten.
 
@@ -228,6 +258,44 @@ DOCKERHUB_NAMESPACE="${DOCKERHUB_NAMESPACE:-$DOCKERHUB_NAMESPACE_DEFAULT}"
 COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-$COMPOSE_PROJECT_NAME_DEFAULT}"
 export COMPOSE_PROJECT_NAME
 
+# ─── non-interactive mode ─────────────────────────────────────────────────────
+#
+# Three ways to opt in (highest priority first):
+#   1. CLI flag: --yes, -y, --non-interactive
+#   2. Env var:  SMARTOLT_INSTALL_NONINTERACTIVE=1
+#   3. Heuristic: stdin is not a TTY and there's no /dev/tty available
+#
+# In non-interactive mode every prompt is skipped and the wizard falls back
+# to defaults (or to overrides from env vars documented in README.md).
+# If a question is unanswered and no sensible default exists, the wizard
+# dies with a message naming the env var to set.
+#
+# `SMARTOLT_INSTALL_SKIP_DEPLOY=1` writes files but does NOT call
+# `docker compose pull/up` and skips the healthcheck.
+# `SMARTOLT_INSTALL_DRY_RUN=1` only prints the plan.
+#
+# You can also pre-answer every question via env vars:
+#   SMARTOLT_ADMIN_USERNAME, SMARTOLT_ADMIN_PASSWORD
+#   SMARTOLT_BASE_URL, SMARTOLT_API_KEY
+#   SMARTOLT_TIMEZONE, SMARTOLT_HOUR_START, SMARTOLT_HOUR_END
+#   SMARTOLT_PUBLIC_DOMAIN, SMARTOLT_LETSENCRYPT_EMAIL
+#   SMARTOLT_OVERWRITE_ENV=Y, SMARTOLT_KEEP_DB=N
+NONINTERACTIVE=0
+for arg in "$@"; do
+  case "$arg" in
+    --yes|-y|--non-interactive) NONINTERACTIVE=1 ;;
+  esac
+done
+[[ -n "${SMARTOLT_INSTALL_NONINTERACTIVE:-}" ]] && NONINTERACTIVE=1
+if [[ $NONINTERACTIVE -eq 0 && ! -t 0 && ! -r /dev/tty ]]; then
+  # No TTY available at all (CI, systemd unit, piped from curl without -t).
+  NONINTERACTIVE=1
+fi
+export NONINTERACTIVE
+
+SKIP_DEPLOY="${SMARTOLT_INSTALL_SKIP_DEPLOY:-0}"
+DRY_RUN="${SMARTOLT_INSTALL_DRY_RUN:-0}"
+
 # ─── input helpers ───────────────────────────────────────────────────────────
 #
 # We have to read from /dev/tty (not stdin) when invoked as 'curl | bash' because
@@ -247,12 +315,22 @@ have_tty() {
 # "secret", the input is read with -s (no echo). Exits non-zero if the user
 # provides an empty value AND no default was given.
 #
+# In non-interactive mode (NONINTERACTIVE=1) the prompt is skipped, the
+# default is taken silently, and the chosen value is logged so the operator
+# can audit it after the fact.
+#
 # Usage: read_input VAR "Prompt" [default] [secret]
 read_input() {
   local var_name="$1" prompt="$2" default="${3:-}" mode="${4:-}"
   local displayed="${default:-(required)}" reply=""
 
-  if have_tty; then
+  if [[ "$NONINTERACTIVE" -eq 1 ]]; then
+    if [[ -z "$default" ]]; then
+      die "Refusing to run non-interactively: '$prompt' is required and no default is available. Set the corresponding env var before invoking this script."
+    fi
+    reply="$default"
+    printf "    %s: %s (default)\n" "$prompt" "$([[ "$mode" == "secret" ]] && echo "***" || echo "$reply")"
+  elif have_tty; then
     if [[ "$mode" == "secret" ]]; then
       read -r -s -p "    $prompt [$displayed]: " reply </dev/tty || true
       printf "\n"
@@ -283,6 +361,57 @@ read_input() {
     return 1
   fi
   printf -v "$var_name" '%s' "$reply"
+}
+
+# Yes/no prompt. Sets the named variable to "y" or "n".
+# Usage: read_yn VAR "Prompt" [default=Y|N]
+read_yn() {
+  local var_name="$1" prompt="$2" default="${3:-Y}" reply=""
+  local shown
+  if [[ "$default" =~ ^[Yy]$ ]]; then shown="Y/n"; else shown="y/N"; fi
+
+  if [[ "$NONINTERACTIVE" -eq 1 ]]; then
+    if [[ "$default" =~ ^[Yy]$ ]]; then
+      printf "    %s: Y (default)\n" "$prompt"
+      printf -v "$var_name" 'y'
+    else
+      printf "    %s: n (default)\n" "$prompt"
+      printf -v "$var_name" 'n'
+    fi
+    return 0
+  fi
+
+  if have_tty; then
+    read -r -p "    $prompt [$shown]: " reply </dev/tty || true
+  else
+    read -r -p "    $prompt [$shown]: " reply || true
+  fi
+  reply="${reply:-$default}"
+  if [[ "$reply" =~ ^[Yy]$ ]]; then
+    printf -v "$var_name" 'y'
+  elif [[ "$reply" =~ ^[Nn]$ ]]; then
+    printf -v "$var_name" 'n'
+  else
+    err "Please answer Y or n (got '$reply')."
+    return 1
+  fi
+}
+
+# Read a positive integer in [min, max]. Re-prompts on invalid input.
+# Usage: read_int VAR "Prompt" min max [default]
+read_int() {
+  local var_name="$1" prompt="$2" min="$3" max="$4" default="${5:-}" reply=""
+  while :; do
+    if ! read_input "$var_name" "$prompt ($min-$max)" "$default"; then
+      return 1
+    fi
+    reply="${!var_name}"
+    if [[ "$reply" =~ ^[0-9]+$ ]] && (( reply >= min && reply <= max )); then
+      return 0
+    fi
+    err "Enter an integer between $min and $max."
+    printf -v "$var_name" ''
+  done
 }
 
 # Yes/no prompt. Sets the named variable to "y" or "n".
@@ -450,7 +579,9 @@ fi
 step "2/8  Inspecting current state"
 
 OVERWRITE_ENV="n"
-if [[ -f ".env" ]]; then
+if [[ -n "${SMARTOLT_OVERWRITE_ENV:-}" ]]; then
+  OVERWRITE_ENV="${SMARTOLT_OVERWRITE_ENV}"
+elif [[ -f ".env" ]]; then
   warn "Existing .env found in this directory."
   if ! read_yn OVERWRITE_ENV "Overwrite .env?" "N"; then
     die "Aborted by user."
@@ -458,7 +589,9 @@ if [[ -f ".env" ]]; then
 fi
 
 KEEP_DB="Y"
-if [[ -d "data" && -f "data/app.db" ]]; then
+if [[ -n "${SMARTOLT_KEEP_DB:-}" ]]; then
+  KEEP_DB="${SMARTOLT_KEEP_DB}"
+elif [[ -d "data" && -f "data/app.db" ]]; then
   warn "Existing database found (data/app.db)."
   if ! read_yn KEEP_DB "Keep database (admin users, history)?" "Y"; then
     die "Aborted by user."
@@ -471,37 +604,56 @@ if [[ "$KEEP_DB" == "y" && -f "data/app.db" ]]; then
   warn "Keeping existing database — these credentials apply only on a fresh DB."
 fi
 
-if ! read_input ADMIN_USER "Admin username" "admin"; then
+# Resolve admin username from env, else prompt (with default "admin").
+if [[ -n "${SMARTOLT_ADMIN_USERNAME:-}" ]]; then
+  ADMIN_USER="${SMARTOLT_ADMIN_USERNAME}"
+  ok "Admin username (from env): $ADMIN_USER"
+elif ! read_input ADMIN_USER "Admin username" "admin"; then
   die "Admin username is required."
 fi
 
 ADMIN_PASSWORD=""
 ADMIN_PASSWORD_GENERATED=""
-if read_yn USE_DEFAULT_PW "Generate a random admin password (you'll see it once)?" "N"; then
-  # 20 chars, base64-ish, URL-safe. Must have at least 8 chars.
+
+# In non-interactive mode, prefer a random password (safer than whatever the
+# operator might have left in their shell history). If they really want to
+# set it explicitly, SMARTOLT_ADMIN_PASSWORD overrides.
+if [[ -n "${SMARTOLT_ADMIN_PASSWORD:-}" ]]; then
+  if (( ${#SMARTOLT_ADMIN_PASSWORD} < 8 )); then
+    die "SMARTOLT_ADMIN_PASSWORD must be at least 8 characters."
+  fi
+  ADMIN_PASSWORD="${SMARTOLT_ADMIN_PASSWORD}"
+  ok "Admin password (from env): ***"
+elif [[ $NONINTERACTIVE -eq 1 ]]; then
   ADMIN_PASSWORD_GENERATED="$(head -c 18 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 20)"
   ADMIN_PASSWORD="$ADMIN_PASSWORD_GENERATED"
-  ok "Generated a random password."
+  ok "Generated a random admin password (set SMARTOLT_ADMIN_PASSWORD to override)."
 else
-  while :; do
-    if ! read_input ADMIN_PASSWORD "Admin password (min 8 chars, Enter to keep blank)" "" "secret"; then
-      err "Admin password is required."
+  if read_yn USE_DEFAULT_PW "Generate a random admin password (you'll see it once)?" "N"; then
+    ADMIN_PASSWORD_GENERATED="$(head -c 18 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 20)"
+    ADMIN_PASSWORD="$ADMIN_PASSWORD_GENERATED"
+    ok "Generated a random password."
+  else
+    while :; do
+      if ! read_input ADMIN_PASSWORD "Admin password (min 8 chars, Enter to keep blank)" "" "secret"; then
+        err "Admin password is required."
+        ADMIN_PASSWORD=""
+        continue
+      fi
+      if [[ -z "$ADMIN_PASSWORD" ]]; then
+        warn "Password is blank. The wizard will generate one for you."
+        ADMIN_PASSWORD_GENERATED="$(head -c 18 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 20)"
+        ADMIN_PASSWORD="$ADMIN_PASSWORD_GENERATED"
+        ok "Generated a random password."
+        break
+      fi
+      if (( ${#ADMIN_PASSWORD} >= 8 )); then
+        break
+      fi
+      err "Password too short (min 8 characters)."
       ADMIN_PASSWORD=""
-      continue
-    fi
-    if [[ -z "$ADMIN_PASSWORD" ]]; then
-      warn "Password is blank. The wizard will generate one for you."
-      ADMIN_PASSWORD_GENERATED="$(head -c 18 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 20)"
-      ADMIN_PASSWORD="$ADMIN_PASSWORD_GENERATED"
-      ok "Generated a random password."
-      break
-    fi
-    if [[ "${#ADMIN_PASSWORD}" -ge 8 ]]; then
-      break
-    fi
-    err "Password too short (min 8 characters)."
-    ADMIN_PASSWORD=""
-  done
+    done
+  fi
 fi
 ok "Admin user: $ADMIN_USER"
 
@@ -511,9 +663,18 @@ warn "SmartOLT URL and API key are optional. The service boots in"
 warn "'unconfigured' mode; you can paste them from the panel"
 warn "(Settings → SmartOLT connection) after first login."
 
-OLT_BASE_URL=""
-OLT_API_KEY=""
-if read_yn SET_SMARTOLT_NOW "Set SmartOLT now (otherwise: from panel later)?" "N"; then
+OLT_BASE_URL="${SMARTOLT_BASE_URL:-}"
+OLT_API_KEY="${SMARTOLT_API_KEY:-}"
+# If both URL and API key are provided via env, skip the prompt entirely.
+if [[ -n "$OLT_BASE_URL" && -n "$OLT_API_KEY" ]]; then
+  SET_SMARTOLT_NOW="y"
+  ok "SmartOLT (from env): $OLT_BASE_URL"
+elif [[ $NONINTERACTIVE -eq 1 ]]; then
+  # Non-interactive: skip SmartOLT setup (the operator can configure it
+  # from the panel later). This is the safe default.
+  SET_SMARTOLT_NOW="n"
+  ok "SmartOLT connection: deferred to post-install panel configuration."
+elif read_yn SET_SMARTOLT_NOW "Set SmartOLT now (otherwise: from panel later)?" "N"; then
   if ! read_input OLT_BASE_URL "Tenant base URL (Enter to skip)" ""; then
     warn "No URL — leaving blank."
     OLT_BASE_URL=""
@@ -541,21 +702,35 @@ fi
 # ─── 5. scheduler window ───────────────────────────────────────────────────────
 step "5/8  Scheduler window"
 
-if ! read_yn USE_BOGOTA "Use America/Bogota timezone?" "Y"; then
+if [[ -n "${SMARTOLT_TIMEZONE:-}" ]]; then
+  TZ_NAME="${SMARTOLT_TIMEZONE}"
+  USE_BOGOTA="n"
+  ok "Timezone (from env): $TZ_NAME"
+elif [[ $NONINTERACTIVE -eq 1 ]]; then
+  TZ_NAME="America/Bogota"
+  USE_BOGOTA="y"
+  ok "Timezone: $TZ_NAME (default)"
+elif ! read_yn USE_BOGOTA "Use America/Bogota timezone?" "Y"; then
   die "Aborted by user."
 fi
-if [[ "$USE_BOGOTA" == "y" ]]; then
-  TZ_NAME="America/Bogota"
-else
-  if ! read_input TZ_NAME "IANA timezone (e.g. America/Mexico_City)" "America/Bogota"; then
-    die "Timezone is required."
+if [[ -z "${TZ_NAME:-}" ]]; then
+  if [[ "$USE_BOGOTA" == "y" ]]; then
+    TZ_NAME="America/Bogota"
+  else
+    if ! read_input TZ_NAME "IANA timezone (e.g. America/Mexico_City)" "America/Bogota"; then
+      die "Timezone is required."
+    fi
   fi
 fi
 
-if ! read_int SCHED_HOUR_START "Window START hour" 0 23 "2"; then
+if [[ -n "${SMARTOLT_HOUR_START:-}" ]]; then
+  SCHED_HOUR_START="${SMARTOLT_HOUR_START}"
+elif ! read_int SCHED_HOUR_START "Window START hour" 0 23 "2"; then
   die "Window start hour is required."
 fi
-if ! read_int SCHED_HOUR_END "Window END hour" 0 23 "3"; then
+if [[ -n "${SMARTOLT_HOUR_END:-}" ]]; then
+  SCHED_HOUR_END="${SMARTOLT_HOUR_END}"
+elif ! read_int SCHED_HOUR_END "Window END hour" 0 23 "3"; then
   die "Window end hour is required."
 fi
 if (( SCHED_HOUR_END <= SCHED_HOUR_START )); then
@@ -565,20 +740,34 @@ ok "Window: $(printf '%02d:00' "$SCHED_HOUR_START") to $(printf '%02d:00' "$SCHE
 
 # ─── 6. public access (HTTPS) ──────────────────────────────────────────────────
 step "6/8  Public access / HTTPS"
+
+# SSL is auto-enabled when SMARTOLT_PUBLIC_DOMAIN is provided. Otherwise,
+# non-interactive mode skips it (default), interactive mode asks.
 ENABLE_SSL="n"
-if ! read_yn ENABLE_SSL "Expose the dashboard to the internet with HTTPS?" "N"; then
+if [[ -n "${SMARTOLT_PUBLIC_DOMAIN:-}" ]]; then
+  ENABLE_SSL="y"
+elif [[ $NONINTERACTIVE -eq 1 ]]; then
+  ENABLE_SSL="n"
+  ok "Public access: deferred to post-install (set SMARTOLT_PUBLIC_DOMAIN to enable)."
+elif ! read_yn ENABLE_SSL "Expose the dashboard to the internet with HTTPS?" "N"; then
   die "Aborted by user."
 fi
 
 PUBLIC_DOMAIN=""
 ADMIN_EMAIL=""
 if [[ "$ENABLE_SSL" == "y" ]]; then
-  if ! read_input PUBLIC_DOMAIN "Public domain (e.g. panel.example.com)"; then
+  if [[ -n "${SMARTOLT_PUBLIC_DOMAIN:-}" ]]; then
+    PUBLIC_DOMAIN="${SMARTOLT_PUBLIC_DOMAIN}"
+    ok "Public domain (from env): $PUBLIC_DOMAIN"
+  elif ! read_input PUBLIC_DOMAIN "Public domain (e.g. panel.example.com)"; then
     die "Public domain is required to enable HTTPS."
   fi
   # Strip a leading wildcard label if the user typed one.
   PUBLIC_DOMAIN="${PUBLIC_DOMAIN#\*.}"
-  if ! read_input ADMIN_EMAIL "Email for Let's Encrypt notifications" "admin@${PUBLIC_DOMAIN#*.}"; then
+  if [[ -n "${SMARTOLT_LETSENCRYPT_EMAIL:-}" ]]; then
+    ADMIN_EMAIL="${SMARTOLT_LETSENCRYPT_EMAIL}"
+    ok "Let's Encrypt email (from env): $ADMIN_EMAIL"
+  elif ! read_input ADMIN_EMAIL "Email for Let's Encrypt notifications" "admin@${PUBLIC_DOMAIN#*.}"; then
     die "Email is required to enable HTTPS."
   fi
   ok "HTTPS will be enabled for $PUBLIC_DOMAIN after you issue a cert in the panel."
@@ -587,133 +776,149 @@ else
 fi
 
 # ─── 7. write & deploy ────────────────────────────────────────────────────────
-step "7/8  Writing configuration"
-
-if [[ "$OVERWRITE_ENV" == "y" || ! -f ".env" ]]; then
-  if [[ -f ".env" ]]; then
-    cp -f .env.example .env
-    ok "Copied .env.example -> .env"
-  else
-    cp -f .env.example .env
-    ok "Created .env from .env.example"
-  fi
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  step "7/8  Writing configuration (DRY_RUN — no files written)"
+  printf "    Plan summary:\n"
+  printf "      SMARTOLT_BASE_URL       = '%s'\n" "$OLT_BASE_URL"
+  printf "      SMARTOLT_API_KEY         = %s\n" "$([[ -n "$OLT_API_KEY" ]] && echo '***set***' || echo '(unset)')"
+  printf "      SCHEDULER_TIMEZONE       = '%s'\n" "$TZ_NAME"
+  printf "      SCHEDULER_HOUR_START     = %s\n" "$SCHED_HOUR_START"
+  printf "      SCHEDULER_HOUR_END       = %s\n" "$SCHED_HOUR_END"
+  printf "      INITIAL_ADMIN_USERNAME   = '%s'\n" "$ADMIN_USER"
+  printf "      INITIAL_ADMIN_PASSWORD   = %s\n" "$([[ -n "$ADMIN_PASSWORD_GENERATED" ]] && echo '(generated, will be printed)' || echo '***set***')"
+  printf "      PUBLIC_DOMAIN (HTTPS)     = '%s'  EMAIL='%s'\n" "$PUBLIC_DOMAIN" "$ADMIN_EMAIL"
+  printf "      DEFAULT_IMAGE_TAG        = '%s'\n" "$DEFAULT_IMAGE_TAG"
 else
-  ok "Keeping existing .env"
-fi
+  step "7/8  Writing configuration"
 
-# Always re-write the user-specific values, even if we kept the rest of .env.
-# This means re-running the wizard with new credentials updates them.
-env_set ".env" \
-  "SMARTOLT_BASE_URL"        "$OLT_BASE_URL" \
-  "SMARTOLT_API_KEY"          "$OLT_API_KEY" \
-  "SCHEDULER_TIMEZONE"        "$TZ_NAME" \
-  "SCHEDULER_HOUR_START"      "$SCHED_HOUR_START" \
-  "SCHEDULER_HOUR_END"        "$SCHED_HOUR_END" \
-  "TZ"                        "$TZ_NAME" \
-  "INITIAL_ADMIN_USERNAME"    "$ADMIN_USER" \
-  "INITIAL_ADMIN_PASSWORD"    "$ADMIN_PASSWORD" \
-  "SMARTOLT_IMAGE"            "${DOCKERHUB_NAMESPACE}/smartolt-automate:${DEFAULT_IMAGE_TAG}" \
-  "SMARTOLT_FRONTEND_IMAGE"   "${DOCKERHUB_NAMESPACE}/smartolt-automate-frontend:${DEFAULT_IMAGE_TAG}" \
-  "PROXY_IMAGE"               "${DOCKERHUB_NAMESPACE}/smartolt-automate-proxy:${DEFAULT_IMAGE_TAG}" \
-  "CERTBOT_IMAGE"             "${DOCKERHUB_NAMESPACE}/smartolt-automate-certbot:${DEFAULT_IMAGE_TAG}"
-ok "Wrote wizard values to .env"
-
-mkdir -p configs
-if [[ ! -f "configs/olts.yaml" ]]; then
-  if [[ -f "configs/olts.example.yaml" ]]; then
-    cp -f configs/olts.example.yaml configs/olts.yaml
-    ok "configs/olts.yaml created from template"
+  if [[ "$OVERWRITE_ENV" == "y" || ! -f ".env" ]]; then
+    if [[ -f ".env" ]]; then
+      cp -f .env.example .env
+      ok "Copied .env.example -> .env"
+    else
+      cp -f .env.example .env
+      ok "Created .env from .env.example"
+    fi
   else
-    warn "No configs/olts.example.yaml template shipped; you will need to create configs/olts.yaml before enabling OLTs."
+    ok "Keeping existing .env"
+  fi
+
+  # Always re-write the user-specific values, even if we kept the rest of .env.
+  # This means re-running the wizard with new credentials updates them.
+  env_set ".env" \
+    "SMARTOLT_BASE_URL"        "$OLT_BASE_URL" \
+    "SMARTOLT_API_KEY"          "$OLT_API_KEY" \
+    "SCHEDULER_TIMEZONE"        "$TZ_NAME" \
+    "SCHEDULER_HOUR_START"      "$SCHED_HOUR_START" \
+    "SCHEDULER_HOUR_END"        "$SCHED_HOUR_END" \
+    "TZ"                        "$TZ_NAME" \
+    "INITIAL_ADMIN_USERNAME"    "$ADMIN_USER" \
+    "INITIAL_ADMIN_PASSWORD"    "$ADMIN_PASSWORD" \
+    "SMARTOLT_IMAGE"            "${DOCKERHUB_NAMESPACE}/smartolt-automate:${DEFAULT_IMAGE_TAG}" \
+    "SMARTOLT_FRONTEND_IMAGE"   "${DOCKERHUB_NAMESPACE}/smartolt-automate-frontend:${DEFAULT_IMAGE_TAG}" \
+    "PROXY_IMAGE"               "${DOCKERHUB_NAMESPACE}/smartolt-automate-proxy:${DEFAULT_IMAGE_TAG}" \
+    "CERTBOT_IMAGE"             "${DOCKERHUB_NAMESPACE}/smartolt-automate-certbot:${DEFAULT_IMAGE_TAG}"
+  ok "Wrote wizard values to .env"
+
+  mkdir -p configs
+  if [[ ! -f "configs/olts.yaml" ]]; then
+    if [[ -f "configs/olts.example.yaml" ]]; then
+      cp -f configs/olts.example.yaml configs/olts.yaml
+      ok "configs/olts.yaml created from template"
+    else
+      warn "No configs/olts.example.yaml template shipped; you will need to create configs/olts.yaml before enabling OLTs."
+    fi
   fi
 fi
 
 step "8/8  Bringing up the stack"
 
-if ! docker compose pull; then
-  die "docker compose pull failed. Check 'docker compose config' and your network."
-fi
-ok "Images pulled"
+# Track whether the wizard considers the deployment healthy. SKIP_DEPLOY
+# and DRY_RUN both short-circuit deploy+healthcheck with up=1.
+up=1
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  ok "DRY_RUN=1 — skipping docker compose pull/up and healthcheck."
+elif [[ "$SKIP_DEPLOY" -eq 1 ]]; then
+  ok "SKIP_DEPLOY=1 — skipping docker compose pull/up and healthcheck."
+  ok "Files are ready. To deploy: cd $(pwd) && docker compose pull && docker compose up -d"
+else
+  up=0
+  if ! docker compose pull; then
+    die "docker compose pull failed. Check 'docker compose config' and your network."
+  fi
+  ok "Images pulled"
 
-if ! docker compose up -d; then
-  die "docker compose up -d failed. Inspect 'docker compose logs' for details."
+  if ! docker compose up -d; then
+    die "docker compose up -d failed. Inspect 'docker compose logs' for details."
+  fi
+  ok "Stack started"
 fi
-ok "Stack started"
 
 # ─── healthcheck ──────────────────────────────────────────────────────────────
 echo ""
-step "Verifying healthchecks"
 HEALTH_URL="http://localhost/api/service/livez"
-printf "  Probing %s ...\n" "$HEALTH_URL"
-up=0
-for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-  if curl --silent --show-error --fail --output /dev/null \
-       --connect-timeout 2 --max-time 4 "$HEALTH_URL"; then
-    up=1
-    ok "Service reachable at $HEALTH_URL"
-    break
-  fi
-  printf "  ... retry %d/15\n" "$i"
-  sleep 3
-done
+if [[ "$DRY_RUN" -eq 1 || "$SKIP_DEPLOY" -eq 1 ]]; then
+  # Deploy was skipped; $up was already set to 1 above.
+  :
+else
+  step "Verifying healthchecks"
+  printf "  Probing %s ...\n" "$HEALTH_URL"
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    if curl --silent --show-error --fail --output /dev/null \
+         --connect-timeout 2 --max-time 4 "$HEALTH_URL"; then
+      up=1
+      ok "Service reachable at $HEALTH_URL"
+      break
+    fi
+    printf "  ... retry %d/15\n" "$i"
+    sleep 3
+  done
 
-docker compose ps
-echo ""
+  docker compose ps
+  echo ""
+fi
 
 # ─── summary ──────────────────────────────────────────────────────────────────
-cat <<EOF
-
-${C_BOLD}Done.${C_NC}
-EOF
+printf "\n%sDone.%s\n" "$C_BOLD" "$C_NC"
 if [[ "$INVOCATION" == "piped" ]]; then
   printf "  Installer:     ${C_BLUE}%s${C_NC}  (cloned; ${C_BOLD}cd${C_NC} here to re-run)\n\n" "$(pwd)"
 fi
-cat <<EOF
-
-  Dashboard:      ${C_BLUE}http://localhost/${C_NC}
-  API health:     ${C_BLUE}${HEALTH_URL}${C_NC}
-EOF
+printf "  Dashboard:      ${C_BLUE}http://localhost/${C_NC}\n"
+printf "  API health:     ${C_BLUE}%s${C_NC}\n" "$HEALTH_URL"
 if [[ -n "$ADMIN_PASSWORD_GENERATED" ]]; then
+  printf "  Admin user:     ${C_BOLD}%s${C_NC}\n" "$ADMIN_USER"
   printf "  Admin password: ${C_BOLD}%s${C_NC}  ${C_YELLOW}(generated — save it now!)${C_NC}\n" "$ADMIN_PASSWORD_GENERATED"
 else
+  printf "  Admin user:     ${C_BOLD}%s${C_NC}\n" "$ADMIN_USER"
   printf "  Admin password: ${C_BOLD}(the one you set)${C_NC}\n"
 fi
 
-${C_BOLD}Next steps:${C_NC}
-  - Open ${C_BLUE}http://localhost/${C_NC} and log in.
-EOF
+printf "\n${C_BOLD}Next steps:${C_NC}\n"
+printf "  - Open ${C_BLUE}http://localhost/${C_NC} and log in.\n"
 if [[ -n "$OLT_BASE_URL" && -n "$OLT_API_KEY" ]]; then
-  cat <<EOF
-  - SmartOLT connection was set during the wizard. The scheduler will
-    pick up your OLTs on the next reload. Add OLTs by editing
-    ${C_BOLD}configs/olts.yaml${C_NC} or via the panel.
-EOF
+  printf "  - SmartOLT connection was set during the wizard. The scheduler will\n"
+  printf "    pick up your OLTs on the next reload. Add OLTs by editing\n"
+  printf "    ${C_BOLD}configs/olts.yaml${C_NC} or via the panel.\n"
 else
-  cat <<EOF
-  - Go to ${C_BOLD}Configuración → Conexión SmartOLT${C_NC} and paste your
-    tenant URL + API token. Until then the scheduler stays idle but
-    you can browse the panel freely.
-EOF
+  printf "  - Go to ${C_BOLD}Configuración → Conexión SmartOLT${C_NC} and paste your\n"
+  printf "    tenant URL + API token. Until then the scheduler stays idle but\n"
+  printf "    you can browse the panel freely.\n"
 fi
 if [[ "$ENABLE_SSL" == "y" ]]; then
-  cat <<EOF
-  - Go to ${C_BOLD}Configuración → Acceso público${C_NC}, pick your DNS provider,
-    fill in its credentials, and issue the certificate.
-EOF
+  printf "  - Go to ${C_BOLD}Configuración → Acceso público${C_NC}, pick your DNS provider,\n"
+  printf "    fill in its credentials, and issue the certificate.\n"
 fi
-cat <<EOF
-  - Add OLTs by editing ${C_BOLD}configs/olts.yaml${C_NC} (or via the panel).
+printf "  - Add OLTs by editing ${C_BOLD}configs/olts.yaml${C_NC} (or via the panel).\n"
 
-${C_BOLD}Re-running:${C_NC}
-  cd "$(pwd)"
-  ./scripts/install.sh            # re-run wizard (preserves data/, asks before overwriting .env)
-  ./scripts/stack.sh status       # container status + healthcheck URLs
-  ./scripts/stack.sh logs web     # tail logs of a service
-  ./scripts/upgrade.sh --check    # check for new versions on Docker Hub
-  ./scripts/stack.sh down         # stop the stack (keeps data)
-  git pull                        # update the installer itself
-
-EOF
+printf "\n${C_BOLD}Re-running:${C_NC}\n"
+printf "  cd %s\n" "$(pwd)"
+printf "  ./scripts/install.sh            # re-run wizard (preserves data/, asks before overwriting .env)\n"
+printf "  ./scripts/stack.sh status       # container status + healthcheck URLs\n"
+printf "  ./scripts/stack.sh logs web     # tail logs of a service\n"
+printf "  ./scripts/upgrade.sh --check    # check for new versions on Docker Hub\n"
+printf "  ./scripts/stack.sh down         # stop the stack (keeps data)\n"
+printf "  git pull                        # update the installer itself\n"
+printf "\n"
 
 if [[ $up -ne 1 ]]; then
   warn "Healthcheck did not respond within the timeout. Run './scripts/stack.sh logs web' to debug."

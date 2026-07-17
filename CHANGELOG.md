@@ -5,6 +5,45 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.6] — 2026-07-17
+
+### Added
+- **Fully non-interactive mode** for `scripts/install.sh`. Activated by:
+  - CLI flag: `--yes`, `-y`, `--non-interactive`
+  - Env var: `SMARTOLT_INSTALL_NONINTERACTIVE=1`
+  - Heuristic: stdin is not a TTY and no `/dev/tty` is available (e.g. `curl ... | bash` without `-t`, CI runners, systemd units)
+- **Optional dry-run** (`SMARTOLT_INSTALL_DRY_RUN=1`): prints the full plan
+  (env-var-derived values, image tags, generated admin password) without
+  touching the filesystem or invoking `docker compose`.
+- **Optional skip-deploy** (`SMARTOLT_INSTALL_SKIP_DEPLOY=1`): writes `.env`
+  and `configs/olts.yaml` but skips `docker compose pull/up` and the
+  healthcheck. Useful for CI where another step will deploy later.
+- **All wizard questions can be pre-answered via env vars**: documented in
+  README under the "Non-interactive / fully automated" section.
+  - `SMARTOLT_ADMIN_USERNAME`, `SMARTOLT_ADMIN_PASSWORD`
+  - `SMARTOLT_BASE_URL`, `SMARTOLT_API_KEY`
+  - `SMARTOLT_TIMEZONE`, `SMARTOLT_HOUR_START`, `SMARTOLT_HOUR_END`
+  - `SMARTOLT_PUBLIC_DOMAIN`, `SMARTOLT_LETSENCRYPT_EMAIL`
+  - `SMARTOLT_OVERWRITE_ENV`, `SMARTOLT_KEEP_DB`
+- Default admin password in non-interactive mode is now an auto-generated
+  20-char random string (printed once at the end of the run), instead of
+  prompting. Operators who need a fixed password can set
+  `SMARTOLT_ADMIN_PASSWORD=<≥8 chars>`.
+- When `SMARTOLT_PUBLIC_DOMAIN` is set, HTTPS is auto-enabled with
+  `admin@<public_domain>` as the Let's Encrypt email (overridable via
+  `SMARTOLT_LETSENCRYPT_EMAIL`).
+
+### Fixed
+- `step "8/8"` would print "Healthcheck did not respond" when
+  `SKIP_DEPLOY=1` or `DRY_RUN=1`, because `$up` was being reset to `0`
+  in the healthcheck loop unconditionally. Now `$up` defaults to `1`
+  in skip/dry-run paths and the loop runs only in the real deploy path.
+- `cat <<EOF ... EOF` heredoc structure around the summary section was
+  malformed (had `Next steps:` floating outside a heredoc, which crashed
+  with `Next: command not found` when `NEXT` substitutions fired).
+  Rewritten with `printf` so it works under both TTY and non-TTY
+  invocations, and doesn't depend on ANSI color environment variables.
+
 ## [0.3.5] — 2026-07-17
 
 ### Changed

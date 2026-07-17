@@ -22,7 +22,7 @@ curl -fsSL https://raw.githubusercontent.com/asotonet/smartolt-automate-installe
 # Or, if you prefer to clone first:
 git clone https://github.com/asotonet/smartolt-automate-installer
 cd smartolt-automate-installer
-git checkout v0.3.5  # pin to a known-good installer version
+git checkout v0.3.6  # pin to a known-good installer version
 ./scripts/install.sh
 ```
 
@@ -35,6 +35,82 @@ The wizard will ask you for:
 5. **Scheduler window** — timezone and integer hour range (default: `America/Bogota`, 02:00–03:00).
 6. **Public access** — optional. If you enable it, you'll need a domain pointing at this server and a DNS provider.
 7. **Deploy** — `docker compose pull`, `docker compose up -d`, and a healthcheck probe.
+
+### Non-interactive / fully automated
+
+The wizard supports three modes that skip all prompts. Activated by:
+
+| Trigger | Example |
+|---|---|
+| CLI flag | `./scripts/install.sh --yes` |
+| Env var | `SMARTOLT_INSTALL_NONINTERACTIVE=1 ./scripts/install.sh` |
+| Heuristic | stdin is not a TTY (e.g. `curl ... \| bash` without `-t`, CI, systemd) |
+
+In non-interactive mode the wizard uses defaults for every question unless an
+override is provided via env var. Defaults are documented below.
+
+Common scenarios:
+
+```bash
+# 1. Quick install with auto-generated admin password (printed at the end):
+SMARTOLT_INSTALL_NONINTERACTIVE=1 \
+  ./scripts/install.sh --yes
+
+# 2. Production install with all config pinned via env vars:
+SMARTOLT_ADMIN_USERNAME=ops \
+SMARTOLT_ADMIN_PASSWORD='super-secret-9u2nF' \
+SMARTOLT_BASE_URL=https://my-tenant.smartolt.com \
+SMARTOLT_API_KEY=your-api-key-here \
+SMARTOLT_TIMEZONE=America/Bogota \
+SMARTOLT_HOUR_START=2 \
+SMARTOLT_HOUR_END=3 \
+SMARTOLT_PUBLIC_DOMAIN=panel.example.com \
+SMARTOLT_LETSENCRYPT_EMAIL=ops@example.com \
+SMARTOLT_INSTALL_NONINTERACTIVE=1 \
+  ./scripts/install.sh --yes
+
+# 3. One-liner for a CI pipeline (curl | bash, no TTY at all):
+curl -fsSL https://raw.githubusercontent.com/asotonet/smartolt-automate-installer/main/scripts/install.sh \
+  | SMARTOLT_ADMIN_USERNAME=ops \
+    SMARTOLT_ADMIN_PASSWORD=$ADMIN_PW \
+    SMARTOLT_PUBLIC_DOMAIN=panel.example.com \
+    SMARTOLT_INSTALL_NONINTERACTIVE=1 \
+    bash
+
+# 4. Render-only mode (write files, don't deploy):
+SMARTOLT_INSTALL_SKIP_DEPLOY=1 \
+SMARTOLT_INSTALL_NONINTERACTIVE=1 \
+  ./scripts/install.sh --yes
+
+# 5. Dry run (print plan, touch nothing):
+SMARTOLT_INSTALL_DRY_RUN=1 \
+SMARTOLT_INSTALL_NONINTERACTIVE=1 \
+  ./scripts/install.sh --yes
+```
+
+#### Environment variables (all optional)
+
+| Variable | Default | Description |
+|---|---|---|
+| `SMARTOLT_INSTALL_NONINTERACTIVE` | _unset_ | Set to `1` to force non-interactive mode |
+| `SMARTOLT_INSTALL_SKIP_DEPLOY` | `0` | Set to `1` to write files but skip `docker compose pull/up` and the healthcheck |
+| `SMARTOLT_INSTALL_DRY_RUN` | `0` | Set to `1` to print the plan without touching anything |
+| `SMARTOLT_ADMIN_USERNAME` | `admin` | Initial admin login |
+| `SMARTOLT_ADMIN_PASSWORD` | random 20 chars | Set explicitly to pin the password. Auto-generated in non-interactive mode otherwise (printed at the end) |
+| `SMARTOLT_OVERWRITE_ENV` | `N` | `Y` to overwrite existing `.env` |
+| `SMARTOLT_KEEP_DB` | `Y` | `N` to wipe the existing database |
+| `SMARTOLT_BASE_URL` | _empty_ | SmartOLT tenant URL (deferred to panel if empty) |
+| `SMARTOLT_API_KEY` | _empty_ | SmartOLT API key |
+| `SMARTOLT_TIMEZONE` | `America/Bogota` | IANA timezone |
+| `SMARTOLT_HOUR_START` | `2` | Scheduler window start hour (0–23) |
+| `SMARTOLT_HOUR_END` | `3` | Scheduler window end hour (1–23, must be > start) |
+| `SMARTOLT_PUBLIC_DOMAIN` | _empty_ | If set, HTTPS is auto-enabled for this domain |
+| `SMARTOLT_LETSENCRYPT_EMAIL` | `admin@<public_domain>` | Email for Let's Encrypt expiry notifications |
+| `SMARTOLT_IMAGE_TAG` | `v0.3.0` | Image tag to install (overrides the wizard default) |
+| `DOCKERHUB_NAMESPACE` | `asoton` | Docker Hub namespace |
+
+If any required value is missing and no default applies, the wizard exits
+with a clear error message naming the env var to set.
 
 When the wizard finishes you'll have:
 
