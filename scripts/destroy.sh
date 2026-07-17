@@ -318,6 +318,13 @@ else
       warn "Skipping $v (--keep-certs)"
       continue
     fi
+    # Re-check existence inside the loop: `docker compose down` may have
+    # already removed some volumes (especially certbot_logs/state/logs),
+    # so don't report spurious failures for those.
+    if ! docker volume ls --format '{{.Name}}' 2>/dev/null | grep -qx "$v"; then
+      # Already gone (compose down handled it).
+      continue
+    fi
     if docker volume rm "$v" >/dev/null 2>&1; then
       ok "Removed volume $v"
     else
