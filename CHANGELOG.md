@@ -5,6 +5,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.2] — 2026-07-17
+
+### Fixed
+- **Port mapping**: `:8080` was mapped to the backend core's `/healthz`
+  endpoint (which gave a 404 for anyone trying to load the UI). Reassigned:
+  - `:8080` → frontend (the React UI — open this in your browser)
+  - `:8090` → backend core health (was `:8080`)
+  - `:8000` → web tier (FastAPI `/api/...`)
+  - `:443`  → Caddy HTTPS proxy (unchanged)
+
+All operator-facing output (`install` summary, `status`) now lists the
+right URL for each role. `.env.example` documents the new
+`FRONTEND_PORT`, `HEALTH_PORT`, `WEB_API_PORT` vars so the host mapping
+is operator-tunable without editing `docker-compose.yml`.
+
+## [0.4.1] — 2026-07-17
+
 ### Changed
 - **`.env.example` ships with safe, deployable defaults** — running
   `./smartolt.sh install --yes` on a fresh clone, with **no env vars

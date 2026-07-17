@@ -350,7 +350,7 @@ cmd_install() {
   docker compose --project-name "$COMPOSE_PROJECT_NAME" up -d 2>&1 | tail -8
 
   step "Verifying healthchecks"
-  HEALTH="http://localhost:8080/healthz"
+  HEALTH="${HEALTHCHECK_URL:-http://localhost:8090/healthz}"
   up=0
   for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
     if curl --silent --fail --output /dev/null --max-time 4 "$HEALTH"; then
@@ -361,8 +361,10 @@ cmd_install() {
   [[ $up -ne 1 ]] && { warn "Healthcheck did not respond within the timeout."; warn "Run './smartolt.sh logs smartolt-automate' to debug."; exit 2; }
 
   printf "\n%sDone.%s\n" "$BOLD" "$NC"
-  printf "  Dashboard:     %shttp://localhost:8080/%s\n" "$BLUE" "$NC"
-  printf "  Admin user:    %s%s%s\n" "$BOLD" "$ADMIN_USER" "$NC"
+  printf "  Dashboard (UI):    %shttp://localhost:8080/%s\n" "$BLUE" "$NC"
+  printf "  Backend healthz:   %shttp://localhost:8090/healthz%s\n" "$BLUE" "$NC"
+  printf "  Web API:           %shttp://localhost:8000/api/%s\n" "$BLUE" "$NC"
+  printf "  Admin user:        %s%s%s\n" "$BOLD" "$ADMIN_USER" "$NC"
   if [[ -n "$ADMIN_PASSWORD_GENERATED" ]]; then
     printf "  Admin pass:    %s%s%s  %s(generated — save it now!)%s\n" "$BOLD" "$ADMIN_PASSWORD_GENERATED" "$NC" "$YELLOW" "$NC"
   fi
@@ -402,8 +404,10 @@ cmd_status() {
   done
   printf "\n"
   step "Endpoints"
-  printf "    Backend (healthz): %shttp://localhost:8080/healthz%s\n" "$BLUE" "$NC"
-  printf "    Frontend (UI):     %shttp://localhost/%s  (via Caddy :443, HTTPS-only)\n" "$BLUE" "$NC"
+  printf "    Frontend (UI):     %shttp://localhost:8080/%s\n" "$BLUE" "$NC"
+  printf "    Backend healthz:   %shttp://localhost:8090/healthz%s\n" "$BLUE" "$NC"
+  printf "    Web API:           %shttp://localhost:8000/api/%s\n" "$BLUE" "$NC"
+  printf "    Caddy proxy (HTTPS): %shttps://localhost/%s  (cert internal on first install)\n" "$BLUE" "$NC"
   [[ -f docker-compose.override.yml ]] && {
     warn "docker-compose.override.yml detected — using -f override."
   }

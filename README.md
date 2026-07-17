@@ -27,7 +27,12 @@ git checkout v0.4.0  # pin to a known-good installer version
 ```
 
 The first run prints an auto-generated admin password at the end — copy it
-before closing the shell. The stack is now running on `http://localhost/`.
+before closing the shell. The stack is now running on:
+
+- `http://localhost:8080/` — the frontend (React UI)
+- `http://localhost:8090/healthz` — backend core health
+- `http://localhost:8000/api/...` — direct web tier API access
+- `https://localhost/` — Caddy HTTPS proxy (cert is internal/self-signed on first install)
 
 If you want to pre-configure the SmartOLT tenant URL/API key and a known
 admin password before installing, edit `.env` and re-run:
@@ -62,7 +67,7 @@ The wizard will ask you for:
 
 When the wizard finishes you'll have:
 
-- `http://localhost/` — the dashboard (login with the admin user you chose).
+- `http://localhost:8080/` — the frontend UI (login with the admin user you chose).
 - 5 healthy containers: `smartolt-automate`, `web`, `frontend`, `proxy`, `certbot`.
 - An `.env` you can edit at any time. Changes to image tags require `./scripts/stack.sh upgrade`.
 

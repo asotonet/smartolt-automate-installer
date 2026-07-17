@@ -47,7 +47,7 @@ services:
       - data:/app/data
       - ./configs:/app/configs
     ports:
-      - "${HEALTH_PORT:-8080}:8080"
+      - "${HEALTH_PORT:-8090}:8080"
     healthcheck:
       test:
         - CMD
@@ -98,8 +98,8 @@ services:
       # This is the only way to drive certbot without exposing a custom
       # control port from those containers. Restrict in production.
       - /var/run/docker.sock:/var/run/docker.sock
-    expose:
-      - "8000"
+    ports:
+      - "${WEB_API_PORT:-8000}:8000"
     depends_on:
       smartolt-automate:
         condition: service_healthy
@@ -117,8 +117,8 @@ services:
     pull_policy: ${PULL_POLICY:-always}
     container_name: smartolt-automate-frontend
     restart: unless-stopped
-    expose:
-      - "80"
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
     depends_on:
       web:
         condition: service_healthy
