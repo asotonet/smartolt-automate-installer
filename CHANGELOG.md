@@ -5,6 +5,32 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.3] — 2026-07-17
+
+### Changed
+- **Traefik 3.1 replaces Caddy + certbot** as the reverse proxy / HTTPS
+  terminator. Single image (`asoton/smartolt-automate-traefik`) handles:
+  - Reverse proxy `/api/*` → web tier, `/*` → frontend
+  - ACME HTTP-01 cert issuance and renewal (auto on first request when
+    `SMARTOLT_PUBLIC_DOMAIN` is set)
+  - HTTP→HTTPS redirect on port 80
+
+  Previous Caddy + certbot DNS-01 stack was split across two containers
+  with shared volumes; Traefik's docker provider removes the need for a
+  static config file — routers are declared via container labels.
+
+### Removed
+- `CERTBOT_IMAGE` env var and `asoton/smartolt-automate-certbot` image.
+- `proxy_caddy`, `certbot_etc`, `certbot_work`, `certbot_logs` volumes.
+- `scripts/ssl/dns-auth-hook.sh` and `dns-cleanup-hook.sh` (DNS-01 hooks).
+
+### Notes
+- **Windows + Docker Desktop**: Traefik's docker provider can't read
+  the Windows named pipe, so Traefik stays `unhealthy` on Windows
+  hosts. The frontend remains reachable via `http://localhost:8080/`
+  (host port mapping on the frontend container). On Linux this is a
+  non-issue.
+
 ## [0.4.2] — 2026-07-17
 
 ### Fixed

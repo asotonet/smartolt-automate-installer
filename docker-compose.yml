@@ -3,13 +3,13 @@
 # This file ships with the public installer repo and references prebuilt
 # images from Docker Hub. No source code from the main project is included.
 # To build images from source, see the upstream repo:
-#   https://github.com/<owner>/smartolt-automate
+#   https://github.com/asotonet/smartolt-automate
 #
 # All values come from .env or are referenced via ${VAR} syntax.
 
 services:
   smartolt-automate:
-    image: ${SMARTOLT_IMAGE:-asoton/smartolt-automate:v0.3.1}
+    image: ${SMARTOLT_IMAGE:-asoton/smartolt-automate:v0.3.3}
     pull_policy: ${PULL_POLICY:-always}
     container_name: smartolt-automate
     restart: unless-stopped
@@ -35,19 +35,23 @@ services:
       STATE_DIR: "${STATE_DIR:-/app/state}"
       OLTS_CONFIG_PATH: "${OLTS_CONFIG_PATH:-/app/configs/olts.yaml}"
       # Shared with the web container so the core scheduler can call
-      # the web's /api/internal/public-access/renew-now endpoint.
+      # the web's /api/internal/public-access/_internal/renew-now endpoint.
       INTERNAL_API_TOKEN: "${INTERNAL_API_TOKEN:-}"
       INTERNAL_API_TOKEN_FILE: "${INTERNAL_API_TOKEN_FILE:-/app/data/internal_token}"
       WEB_SERVICE_NAME: "${WEB_SERVICE_NAME:-smartolt-automate-web}"
       WEB_INTERNAL_PORT: "${WEB_INTERNAL_PORT:-8000}"
       SSL_RENEW_HOUR: "${SSL_RENEW_HOUR:-3,15}"
+      # Traefik service name (so the core scheduler can ping Traefik if needed).
+      PROXY_SERVICE_NAME: "${PROXY_SERVICE_NAME:-smartolt-automate-traefik}"
     volumes:
       - logs:/app/logs
       - state:/app/state
       - data:/app/data
       - ./configs:/app/configs
-    ports:
-      - "${HEALTH_PORT:-8090}:8080"
+    # No host port mapping: the backend core is internal. Traefik reaches
+    # it via the compose network when needed.
+    expose:
+      - "8080"
     healthcheck:
       test:
         - CMD
@@ -60,7 +64,7 @@ services:
       start_period: 15s
 
   web:
-    image: ${SMARTOLT_IMAGE:-asoton/smartolt-automate:v0.3.1}
+    image: ${SMARTOLT_IMAGE:-asoton/smartolt-automate:v0.3.3}
     pull_policy: ${PULL_POLICY:-always}
     container_name: smartolt-automate-web
     restart: unless-stopped
@@ -84,8 +88,7 @@ services:
       WEB_DB_PATH: "/app/data/users.db"
       PROXY_HTTPS_PORT: "${PROXY_HTTPS_PORT:-443}"
       COMPOSE_PROJECT_NAME: "${COMPOSE_PROJECT_NAME:-smartolt_api_automate}"
-      PROXY_SERVICE_NAME: "${PROXY_SERVICE_NAME:-${COMPOSE_PROJECT_NAME:-smartolt_api_automate}-proxy}"
-      CERTBOT_SERVICE_NAME: "${CERTBOT_SERVICE_NAME:-${COMPOSE_PROJECT_NAME:-smartolt_api_automate}-certbot}"
+      PROXY_SERVICE_NAME: "${PROXY_SERVICE_NAME:-smartolt-automate-traefik}"
       INTERNAL_API_TOKEN: "${INTERNAL_API_TOKEN:-}"
       INTERNAL_API_TOKEN_FILE: "${INTERNAL_API_TOKEN_FILE:-/app/data/internal_token}"
     volumes:
@@ -93,13 +96,10 @@ services:
       - state:/app/state:ro
       - data:/app/data
       - ./configs:/app/configs
-      # Mount docker socket so the web tier can `docker compose exec` into
-      # the certbot/proxy containers for cert issuance and config reload.
-      # This is the only way to drive certbot without exposing a custom
-      # control port from those containers. Restrict in production.
-      - /var/run/docker.sock:/var/run/docker.sock
-    ports:
-      - "${WEB_API_PORT:-8000}:8000"
+    # No host port mapping: the web tier (FastAPI) is internal. Traefik
+    # routes /api/* to it via the compose network.
+    expose:
+      - "8000"
     depends_on:
       smartolt-automate:
         condition: service_healthy
@@ -111,13 +111,27 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+    # Traefik routes /api/* to this container when a hostname is configured.
+    # When SMARTOLT_PUBLIC_DOMAIN is empty we set traefik.enable=false so
+    # Traefik ignores the container entirely (the operator is testing
+    # locally without a public domain and uses the host port mappings).
+    labels:
+      - "traefik.enable=${TRAEFIK_ENABLE:-false}"
+      - "traefik.docker.network=smartolt_api_automate_default"
+      - "traefik.http.routers.web-api.rule=Host(`${SMARTOLT_PUBLIC_DOMAIN:-disabled.example}`) && PathPrefix(`/api`)"
+      - "traefik.http.routers.web-api.entrypoints=websecure"
+      - "traefik.http.routers.web-api.tls=true"
+      - "traefik.http.routers.web-api.tls.certresolver=letsencrypt"
+      - "traefik.http.services.web-api.loadbalancer.server.port=8000"
 
   frontend:
-    image: ${SMARTOLT_FRONTEND_IMAGE:-asoton/smartolt-automate-frontend:v0.3.1}
+    image: ${SMARTOLT_FRONTEND_IMAGE:-asoton/smartolt-automate-frontend:v0.3.3}
     pull_policy: ${PULL_POLICY:-always}
     container_name: smartolt-automate-frontend
     restart: unless-stopped
     ports:
+      # Direct host mapping so the UI works without any public hostname
+      # configured (the common case for LAN / test deployments).
       - "${FRONTEND_PORT:-8080}:80"
     depends_on:
       web:
@@ -128,53 +142,56 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+    # Traefik serves this as the catch-all Host rule when a public
+    # domain is configured. /api/* is matched first by the web router.
+    # When SMARTOLT_PUBLIC_DOMAIN is empty the router is disabled (the
+    # operator is testing locally and uses the host port mapping instead).
+    labels:
+      - "traefik.enable=${TRAEFIK_ENABLE:-false}"
+      - "traefik.docker.network=smartolt_api_automate_default"
+      - "traefik.http.routers.frontend.rule=Host(`${SMARTOLT_PUBLIC_DOMAIN:-disabled.example}`)"
+      - "traefik.http.routers.frontend.entrypoints=websecure"
+      - "traefik.http.routers.frontend.tls=true"
+      - "traefik.http.routers.frontend.tls.certresolver=letsencrypt"
+      - "traefik.http.services.frontend.loadbalancer.server.port=80"
 
-  proxy:
-    image: ${PROXY_IMAGE:-asoton/smartolt-automate-proxy:v0.3.3}
+  traefik:
+    image: ${PROXY_IMAGE:-asoton/smartolt-automate-traefik:v0.4.3}
     pull_policy: ${PULL_POLICY:-always}
-    container_name: smartolt-automate-proxy
+    container_name: smartolt-automate-traefik
     restart: unless-stopped
+    command: ["traefik", "--configFile=/etc/traefik/traefik.yml"]
+    environment:
+      SMARTOLT_PUBLIC_DOMAIN: "${SMARTOLT_PUBLIC_DOMAIN:-}"
+      ACME_EMAIL: "${SMARTOLT_LETSENCRYPT_EMAIL:-admin@example.com}"
+      DASHBOARD: "${TRAEFIK_DASHBOARD:-false}"
     volumes:
-      - proxy_caddy:/etc/caddy
-      - certbot_etc:/etc/letsencrypt:ro
-      - certbot_work:/var/lib/letsencrypt:ro
-      - certbot_logs:/var/log/letsencrypt:ro
-    # HTTPS-only. We don't expose :80 because we never serve plain HTTP.
-    # :80 is left free in case anyone wants certbot standalone later.
+      # Traefik needs the Docker socket to watch for new containers and
+      # read their labels. Same trade-off as the previous certbot setup.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - traefik_acme:/etc/traefik
     ports:
+      # Public HTTPS entrypoint.
       - "${PROXY_HTTPS_PORT:-443}:443"
-    depends_on:
-      - frontend
-      - web
+      # Plain HTTP — Traefik handles the HTTP→HTTPS redirect internally.
+      - "80:80"
+      # Optional dashboard (set TRAEFIK_DASHBOARD=1 to enable).
+      - "${TRAEFIK_DASHBOARD_PORT:-8081}:8081"
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- --spider http://127.0.0.1:80/ >/dev/null 2>&1 || exit 0"]
+      # Traefik 3.x doesn't expose a /ping endpoint. Check that the
+      # process is alive and the entrypoint is listening by hitting
+      # the redirect port (web plain HTTP entrypoint).
+      test: ["CMD-SHELL", "wget -qO- --spider http://127.0.0.1:80/ >/dev/null 2>&1 || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 10s
-
-  certbot:
-    image: ${CERTBOT_IMAGE:-asoton/smartolt-automate-certbot:v0.3.1}
-    pull_policy: ${PULL_POLICY:-always}
-    container_name: smartolt-automate-certbot
-    restart: unless-stopped
-    environment:
-      GLOBAL_CONFIG_PATH: /app/configs/global.yaml
-    volumes:
-      - certbot_etc:/etc/letsencrypt
-      - certbot_work:/var/lib/letsencrypt
-      - certbot_logs:/var/log/letsencrypt
-      - ./configs:/app/configs:ro
-      - ./scripts/ssl:/scripts:ro
-    # No ports. certbot only does DNS-01 (outbound) so it doesn't need
-    # :80 or :443 — and doesn't need a webroot volume either.
-    entrypoint: ["sleep", "infinity"]
+    depends_on:
+      - frontend
+      - web
 
 volumes:
   logs:
   state:
   data:
-  proxy_caddy:
-  certbot_etc:
-  certbot_work:
-  certbot_logs:
+  traefik_acme:

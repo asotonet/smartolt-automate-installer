@@ -1,6 +1,6 @@
 # SmartOLT Automate Installer
 
-One-command installer for [SmartOLT Automate](https://github.com/asotonet/smartolt-automate): a guided wizard that pulls prebuilt Docker images from Docker Hub, generates `.env`, and brings the full 5-service stack online — including the optional reverse proxy and HTTPS (Caddy + certbot with DNS-01).
+One-command installer for [SmartOLT Automate](https://github.com/asotonet/smartolt-automate): a guided wizard that pulls prebuilt Docker images from Docker Hub, generates `.env`, and brings the full 4-service stack online — including the reverse proxy and auto-HTTPS (Traefik with ACME HTTP-01 Let's Encrypt).
 
 This repository is **public** and contains no application source code. The full source lives in the upstream project; the images you pull are signed and pinned to specific versions.
 
@@ -8,7 +8,7 @@ This repository is **public** and contains no application source code. The full 
 
 - **Single entry point** — one `./smartolt.sh` with subcommands: `install`, `deploy`, `status`, `logs`, `renew`, `upgrade`, `destroy`. No more juggling 4 separate scripts.
 - **Interactive wizard** — `install` walks you through 7 steps: prerequisites, admin credentials, SmartOLT connection, scheduler window, public access, deploy, healthcheck. Or run with `--non-interactive` and env vars for full automation.
-- **Prebuilt images** — pulls `asoton/smartolt-automate`, `asoton/smartolt-automate-frontend`, `asoton/smartolt-automate-proxy`, and `asoton/smartolt-automate-certbot` from Docker Hub. No `git clone`, no build step.
+- **Prebuilt images** — pulls `asoton/smartolt-automate`, `asoton/smartolt-automate-frontend`, and `asoton/smartolt-automate-traefik` from Docker Hub. No `git clone`, no build step.
 - **HTTPS included** — 47 DNS providers supported out of the box (Cloudflare, Route53, DigitalOcean, Gandi, Hetzner, Google Cloud DNS, plus manual mode). Cert issuance and renewal are managed from the panel, no shell access needed. Auto-renewal runs twice a day via the core scheduler.
 - **Hot reload** — change the SmartOLT tenant URL, API token, scheduler window, or SSL settings from the panel; no `docker compose restart` required.
 - **Token safety** — the SmartOLT API token is never echoed in full. The panel shows a `abc…2345`-style preview.
@@ -32,7 +32,7 @@ before closing the shell. The stack is now running on:
 - `http://localhost:8080/` — the frontend (React UI)
 - `http://localhost:8090/healthz` — backend core health
 - `http://localhost:8000/api/...` — direct web tier API access
-- `https://localhost/` — Caddy HTTPS proxy (cert is internal/self-signed on first install)
+- `https://localhost/` — Traefik HTTPS proxy (self-signed cert until SMARTOLT_PUBLIC_DOMAIN is set; then real Let's Encrypt)
 
 If you want to pre-configure the SmartOLT tenant URL/API key and a known
 admin password before installing, edit `.env` and re-run:
@@ -68,7 +68,7 @@ The wizard will ask you for:
 When the wizard finishes you'll have:
 
 - `http://localhost:8080/` — the frontend UI (login with the admin user you chose).
-- 5 healthy containers: `smartolt-automate`, `web`, `frontend`, `proxy`, `certbot`.
+- 4 healthy containers: `smartolt-automate`, `web`, `frontend`, `traefik`.
 - An `.env` you can edit at any time. Changes to image tags require `./scripts/stack.sh upgrade`.
 
 ## Day-to-day operations
@@ -78,7 +78,7 @@ When the wizard finishes you'll have:
 ./smartolt.sh logs     # tail logs of all services (-f follow)
 ./smartolt.sh logs smartolt-automate-web --no-follow   # tail once and exit
 ./smartolt.sh deploy    # re-apply docker compose up -d
-./smartolt.sh renew     # force certbot renew now (debug)
+./smartolt.sh renew     # force a renew-now check (debug)
 ./smartolt.sh upgrade   # pull + restart at the version in .env
 ./smartolt.sh upgrade v0.3.4   # upgrade to a specific tag
 ./smartolt.sh destroy   # nuke everything the installer created
@@ -89,7 +89,7 @@ The legacy `scripts/install.sh`, `scripts/upgrade.sh`, `scripts/stack.sh`, and `
 ## Publishing a new release
 
 `scripts/release.sh` tags and pushes all four images
-(`smartolt-automate`, `...-frontend`, `...-proxy`, `...-certbot`)
+(`smartolt-automate`, `...-frontend`, `...-traefik`)
 to Docker Hub under one version. Idempotent: re-tagging an
 identical image deduplicates at the layer level.
 
@@ -124,14 +124,15 @@ Key variables:
 | `INITIAL_ADMIN_USERNAME` / `_PASSWORD` | — | Created on first boot. After that, manage users from the panel. |
 | `SCHEDULER_TIMEZONE` | `America/Bogota` | IANA timezone |
 | `SCHEDULER_HOUR_START` / `_END` | `2` / `3` | Window as integer hours (UTC offset of the timezone) |
-| `PROXY_HTTP_PORT` / `PROXY_HTTPS_PORT` | `80` / `443` | Host ports for the reverse proxy |
-| `SMARTOLT_IMAGE` | `asoton/smartolt-automate:v0.3.0` | Backend + web tier image |
-| `SMARTOLT_FRONTEND_IMAGE` | `asoton/smartolt-automate-frontend:v0.3.0` | Frontend image |
-| `PROXY_IMAGE` | `asoton/smartolt-automate-proxy:v0.3.0` | Caddy image |
-| `CERTBOT_IMAGE` | `asoton/smartolt-automate-certbot:v0.3.0` | Certbot image (46 DNS plugins) |
+| `PROXY_HTTPS_PORT` | `443` | Host port for the Traefik HTTPS entrypoint |
+| `SMARTOLT_IMAGE` | `asoton/smartolt-automate:v0.3.3` | Backend + web tier image |
+| `SMARTOLT_FRONTEND_IMAGE` | `asoton/smartolt-automate-frontend:v0.3.3` | Frontend image |
+| `PROXY_IMAGE` | `asoton/smartolt-automate-traefik:v0.4.3` | Traefik reverse proxy + ACME |
 | `PULL_POLICY` | `always` | `always` pulls on every `up`; `missing`/`if_not_present` honours local cache |
-| `INTERNAL_API_TOKEN` | (auto-generated) | Shared secret between core scheduler and web tier for the SSL renewal cron. Auto-created by web on first boot and persisted to `data/internal_token`. Leave blank unless you want a fixed value. |
-| `SSL_RENEW_HOUR` | `3,15` | Hours of day when the core scheduler triggers `certbot renew`. Default: 03:00 and 15:00 in the scheduler timezone. |
+| `SMARTOLT_PUBLIC_DOMAIN` | _(empty)_ | When set, Traefik issues a real Let's Encrypt cert via HTTP-01. The hostname's DNS A record MUST point at this host. |
+| `SMARTOLT_LETSENCRYPT_EMAIL` | `admin@example.com` | Email for ACME registration |
+| `TRAEFIK_DASHBOARD` | `false` | Set to `true` to enable Traefik's web dashboard on `:8081` |
+| `SSL_RENEW_HOUR` | `3,15` | Cron hours for the core's certbot-renew fallback. With Traefik, ACME HTTP-01 certs renew automatically; this is belt-and-suspenders. |
 
 ## Architecture
 

@@ -115,12 +115,12 @@ if [[ -f .env ]]; then
 fi
 
 # ─── shared helpers ──────────────────────────────────────────────────────────
-DEFAULT_IMAGE_TAG="${SMARTOLT_IMAGE_TAG:-v0.3.3}"
+DEFAULT_IMAGE_TAG="${SMARTOLT_IMAGE_TAG:-v0.4.3}"
 DOCKERHUB_NAMESPACE="${DOCKERHUB_NAMESPACE:-asoton}"
 COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-smartolt_api_automate}"
 export COMPOSE_PROJECT_NAME
 
-CONTAINER_NAMES=(smartolt-automate smartolt-automate-web smartolt-automate-frontend smartolt-automate-proxy smartolt-automate-certbot)
+CONTAINER_NAMES=(smartolt-automate smartolt-automate-web smartolt-automate-frontend smartolt-automate-traefik)
 
 container_status() {
   docker ps -a --filter "name=smartolt" \
@@ -330,9 +330,17 @@ cmd_install() {
     "$ADMIN_USER" "$ADMIN_PASSWORD" \
     "${DOCKERHUB_NAMESPACE}/smartolt-automate:${IMAGE_TAG}" \
     "${DOCKERHUB_NAMESPACE}/smartolt-automate-frontend:${IMAGE_TAG}" \
-    "${DOCKERHUB_NAMESPACE}/smartolt-automate-proxy:${IMAGE_TAG}" \
-    "${DOCKERHUB_NAMESPACE}/smartolt-automate-certbot:${IMAGE_TAG}"
+    "${DOCKERHUB_NAMESPACE}/smartolt-automate-traefik:${IMAGE_TAG}" \
   ok "Wrote wizard values to .env"
+
+  # Set TRAEFIK_ENABLE based on whether the operator configured a public
+  # domain. Empty PUBLIC_DOMAIN = Traefik ignores the frontend/web
+  # containers (operator is using the host port mapping for local testing).
+  TRAEFIK_ENABLE="false"
+  [[ -n "$PUBLIC_DOMAIN" ]] && TRAEFIK_ENABLE="true"
+  sed -i.bak -E "s|^TRAEFIK_ENABLE=.*|TRAEFIK_ENABLE=$TRAEFIK_ENABLE|" .env
+  rm -f .env.bak
+  ok "TRAEFIK_ENABLE=$TRAEFIK_ENABLE (set by install based on SMARTOLT_PUBLIC_DOMAIN)"
 
   mkdir -p configs
   [[ ! -f configs/olts.yaml && -f configs/olts.example.yaml ]] && {
@@ -350,7 +358,10 @@ cmd_install() {
   docker compose --project-name "$COMPOSE_PROJECT_NAME" up -d 2>&1 | tail -8
 
   step "Verifying healthchecks"
-  HEALTH="${HEALTHCHECK_URL:-http://localhost:8090/healthz}"
+  # Probe the frontend (the only host-published service) to confirm the
+  # full stack is up. The backend core and web tier are internal; if the
+  # frontend is serving HTTP, the compose network is healthy.
+  HEALTH="${HEALTHCHECK_URL:-http://localhost:8080/}"
   up=0
   for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
     if curl --silent --fail --output /dev/null --max-time 4 "$HEALTH"; then
@@ -362,8 +373,7 @@ cmd_install() {
 
   printf "\n%sDone.%s\n" "$BOLD" "$NC"
   printf "  Dashboard (UI):    %shttp://localhost:8080/%s\n" "$BLUE" "$NC"
-  printf "  Backend healthz:   %shttp://localhost:8090/healthz%s\n" "$BLUE" "$NC"
-  printf "  Web API:           %shttp://localhost:8000/api/%s\n" "$BLUE" "$NC"
+  printf "  Traefik proxy (HTTPS): %shttps://localhost/%s  (self-signed cert until SMARTOLT_PUBLIC_DOMAIN is set)\n" "$BLUE" "$NC"
   printf "  Admin user:        %s%s%s\n" "$BOLD" "$ADMIN_USER" "$NC"
   if [[ -n "$ADMIN_PASSWORD_GENERATED" ]]; then
     printf "  Admin pass:    %s%s%s  %s(generated — save it now!)%s\n" "$BOLD" "$ADMIN_PASSWORD_GENERATED" "$NC" "$YELLOW" "$NC"
@@ -405,9 +415,7 @@ cmd_status() {
   printf "\n"
   step "Endpoints"
   printf "    Frontend (UI):     %shttp://localhost:8080/%s\n" "$BLUE" "$NC"
-  printf "    Backend healthz:   %shttp://localhost:8090/healthz%s\n" "$BLUE" "$NC"
-  printf "    Web API:           %shttp://localhost:8000/api/%s\n" "$BLUE" "$NC"
-  printf "    Caddy proxy (HTTPS): %shttps://localhost/%s  (cert internal on first install)\n" "$BLUE" "$NC"
+  printf "    Traefik proxy (HTTPS): %shttps://localhost/%s  (self-signed cert until SMARTOLT_PUBLIC_DOMAIN is set)\n" "$BLUE" "$NC"
   [[ -f docker-compose.override.yml ]] && {
     warn "docker-compose.override.yml detected — using -f override."
   }
@@ -445,7 +453,7 @@ except Exception as e:
 " 2>&1 | tail -1)
   echo "  $RESP"
   if echo "$RESP" | grep -q '200 {"ok":true'; then ok "Renewal check finished."; return 0
-  else warn "Renewal check failed. Check logs: ./smartolt.sh logs smartolt-automate-certbot"; return 1; fi
+  else warn "Renewal check failed. Check logs: ./smartolt.sh logs smartolt-automate-traefik"; return 1; fi
 }
 
 # ─── subcommand: upgrade ─────────────────────────────────────────────────────
@@ -471,8 +479,7 @@ cmd_upgrade() {
     case "$var" in
       SMARTOLT_IMAGE)         repo="smartolt-automate" ;;
       SMARTOLT_FRONTEND_IMAGE) repo="smartolt-automate-frontend" ;;
-      PROXY_IMAGE)             repo="smartolt-automate-proxy" ;;
-      CERTBOT_IMAGE)           repo="smartolt-automate-certbot" ;;
+      PROXY_IMAGE)             repo="smartolt-automate-traefik" ;;
     esac
     sed -i.bak -E "s|^${var}=.*|${var}=${DOCKERHUB_NAMESPACE}/${repo}:${TARGET}|" .env
   done
@@ -498,8 +505,8 @@ cmd_destroy() {
   PROJECT="${PROJECT:-smartolt_api_automate}"
   ALL_PROJECTS=("$PROJECT")
   for v in $(docker volume ls --format '{{.Name}}' 2>/dev/null \
-             | grep -E '_(logs|state|data|proxy_caddy|certbot_etc|certbot_work|certbot_logs)$'); do
-    p="${v%_logs}"; p="${p%_state}"; p="${p%_data}"; p="${p%_proxy_caddy}"
+             | grep -E '_(logs|state|data|traefik_acme)$'); do
+    p="${v%_logs}"; p="${p%_state}"; p="${p%_data}"; p="${p%_traefik_acme}"
     p="${p%_certbot_etc}"; p="${p%_certbot_work}"; p="${p%_certbot_logs}"
     [[ -n "$p" && "$p" != "$PROJECT" ]] && ALL_PROJECTS+=("$p")
   done
@@ -509,13 +516,12 @@ cmd_destroy() {
     docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$n" && CONTAINERS_T+=("$n")
   done
   for p in "${ALL_PROJECTS[@]}"; do
-    for v in ${p}_logs ${p}_state ${p}_data ${p}_proxy_caddy \
-             ${p}_certbot_etc ${p}_certbot_work ${p}_certbot_logs; do
+    for v in ${p}_logs ${p}_state ${p}_data ${p}_traefik_acme; do
       docker volume ls --format '{{.Name}}' 2>/dev/null | grep -qx "$v" && VOLUMES_T+=("$v")
     done
     docker network ls --format '{{.Name}}' 2>/dev/null | grep -qx "${p}_default" && NETWORKS_T+=("${p}_default")
   done
-  for r in smartolt-automate smartolt-automate-frontend smartolt-automate-proxy smartolt-automate-certbot; do
+  for r in smartolt-automate smartolt-automate-frontend smartolt-automate-traefik; do
     ids=$(docker image ls --format '{{.Repository}} {{.ID}}' 2>/dev/null | awk -v r="$r" '$1 == r {print $2}')
     [[ -n "$ids" ]] && while read -r id; do [[ -n "$id" ]] && IMAGES_T+=("$r:$id"); done <<< "$ids"
   done
