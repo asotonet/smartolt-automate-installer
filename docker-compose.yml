@@ -129,10 +129,19 @@ services:
     pull_policy: ${PULL_POLICY:-always}
     container_name: smartolt-automate-frontend
     restart: unless-stopped
+    # Host port mapping. Controlled by EXPOSE_FRONTEND_DIRECTLY:
+    #   true  → bound on all interfaces (0.0.0.0); reachable directly
+    #           via http://HOST:8080/ for LAN/test installs.
+    #   false → bound to 127.0.0.1 only; only Traefik can reach it
+    #           via the compose network. Use this for production
+    #           deployments where the operator wants Traefik to be the
+    #           only public entry point.
     ports:
-      # Direct host mapping so the UI works without any public hostname
-      # configured (the common case for LAN / test deployments).
-      - "${FRONTEND_PORT:-8080}:80"
+      - mode: ingress
+        target: 80
+        published: "${FRONTEND_PORT:-8080}"
+        protocol: tcp
+        host_ip: "${FRONTEND_BIND_IP:-0.0.0.0}"
     depends_on:
       web:
         condition: service_healthy

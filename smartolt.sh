@@ -120,6 +120,32 @@ DOCKERHUB_NAMESPACE="${DOCKERHUB_NAMESPACE:-asoton}"
 COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-smartolt_api_automate}"
 export COMPOSE_PROJECT_NAME
 
+# Decide whether the frontend container publishes on all interfaces
+# (0.0.0.0) or only on the loopback (127.0.0.1).
+#
+# Behavior:
+#   - If the operator explicitly set EXPOSE_FRONTEND_DIRECTLY in the shell
+#     (passed via env var when invoking this script), respect it as-is.
+#   - Otherwise, auto-detect based on SMARTOLT_PUBLIC_DOMAIN:
+#       empty PUBLIC_DOMAIN → expose directly (true, 0.0.0.0)
+#       set PUBLIC_DOMAIN   → loopback only (false, 127.0.0.1)
+#   - If the variable is unset entirely, default to direct (true, 0.0.0.0).
+#
+# Strip trailing \r that Windows-edited .env files may carry.
+EXPOSE_FRONTEND_DIRECTLY="${EXPOSE_FRONTEND_DIRECTLY%$'\r'}"
+if [[ -z "${EXPOSE_FRONTEND_DIRECTLY:-}" ]]; then
+  # Variable is unset → default to direct.
+  EXPOSE_FRONTEND_DIRECTLY="true"
+fi
+# At this point EXPOSE_FRONTEND_DIRECTLY is either "true", "false", or
+# "yes"/"no" — anything else is treated as false (loopback).
+if [[ "${EXPOSE_FRONTEND_DIRECTLY}" =~ ^[Yy](es)?$ ]]; then
+  FRONTEND_BIND_IP="${FRONTEND_BIND_IP:-0.0.0.0}"
+else
+  FRONTEND_BIND_IP="${FRONTEND_BIND_IP:-127.0.0.1}"
+fi
+export FRONTEND_BIND_IP EXPOSE_FRONTEND_DIRECTLY
+
 CONTAINER_NAMES=(smartolt-automate smartolt-automate-web smartolt-automate-frontend smartolt-automate-traefik)
 
 container_status() {
@@ -341,6 +367,25 @@ cmd_install() {
   sed -i.bak -E "s|^TRAEFIK_ENABLE=.*|TRAEFIK_ENABLE=$TRAEFIK_ENABLE|" .env
   rm -f .env.bak
   ok "TRAEFIK_ENABLE=$TRAEFIK_ENABLE (set by install based on SMARTOLT_PUBLIC_DOMAIN)"
+
+  # Bind the frontend host port to all interfaces or loopback only,
+  # depending on whether the operator wants it reachable directly or
+  # only via Traefik. We always write the canonical value to .env based
+  # on the current SMARTOLT_PUBLIC_DOMAIN; operators who want a fixed
+  # value can edit .env *after* install (they'd have to override
+  # EXPOSE_FRONTEND_DIRECTLY=true to keep the loopback bind on a
+  # re-install with PUBLIC_DOMAIN set).
+  if [[ -z "${PUBLIC_DOMAIN}" ]]; then
+    TARGET_EFD="true"
+    TARGET_BIND="0.0.0.0"
+  else
+    TARGET_EFD="false"
+    TARGET_BIND="127.0.0.1"
+  fi
+  sed -i.bak -E "s|^EXPOSE_FRONTEND_DIRECTLY=.*|EXPOSE_FRONTEND_DIRECTLY=${TARGET_EFD}|" .env
+  sed -i.bak -E "s|^FRONTEND_BIND_IP=.*|FRONTEND_BIND_IP=${TARGET_BIND}|" .env
+  rm -f .env.bak
+  ok "Frontend host bind: $TARGET_BIND (EXPOSE_FRONTEND_DIRECTLY=$TARGET_EFD)"
 
   mkdir -p configs
   [[ ! -f configs/olts.yaml && -f configs/olts.example.yaml ]] && {
