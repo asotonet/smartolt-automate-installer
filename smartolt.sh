@@ -198,8 +198,81 @@ PY
 }
 
 # ─── subcommand: install ─────────────────────────────────────────────────────
+# Auto-install Docker via the official get-docker.sh script when the
+# binary or daemon is missing. This makes `./smartolt.sh install` a true
+# one-command deploy on a fresh Ubuntu/Debian/CentOS host.
+#
+# Flow:
+#   1. Detect whether the `docker` CLI is on PATH.
+#   2. If not (or `docker info` fails), curl the official install script
+#      from get.docker.com and pipe it to `sh`.
+#   3. Verify the install by re-running `docker --version` and
+#      `docker info`.
+#   4. Skip on Windows / macOS (operator installs Docker Desktop manually).
+_ensure_docker() {
+  if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    return 0
+  fi
+  # Windows / macOS — we can't auto-install Docker here. Operator runs
+  # Docker Desktop manually.
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*|Darwin*)
+      return 0 ;;
+  esac
+  warn "Docker not detected. Installing via the official get-docker.sh script..."
+  if ! command -v curl >/dev/null 2>&1; then
+    die "curl is required to install Docker automatically. Install curl (e.g. 'apt install curl') and re-run."
+  fi
+  # Run the official Docker install script. It auto-detects the distro
+  # and uses the right package manager (apt for Debian/Ubuntu, dnf/yum
+  # for Fedora/CentOS/RHEL, etc.). Output goes to a log file we can show
+  # on failure.
+  local log
+  log="$(mktemp -t smartolt-install-docker-XXXXXX.log 2>/dev/null || echo /tmp/smartolt-install-docker.log)"
+  if ! curl --fail --silent --show-error --location \
+        https://get.docker.com -o "$log"; then
+    err "curl failed to download get.docker.com. Install Docker manually:"
+    err "  https://docs.docker.com/engine/install/"
+    sed 's/^/    /' "$log" >&2
+    rm -f "$log"
+    die "aborting install"
+  fi
+  if ! sh "$log" 2>&1 | tee -a "$log" >&2; then
+    err "Docker install script failed. Last lines:"
+    tail -n 20 "$log" >&2
+    rm -f "$log"
+    die "aborting install"
+  fi
+  rm -f "$log"
+  # Sanity-check the install.
+  if ! command -v docker >/dev/null 2>&1; then
+    die "Docker install script ran but 'docker' is still not on PATH."
+  fi
+  # The install script doesn't auto-start the daemon on some distros.
+  if ! docker info >/dev/null 2>&1; then
+    warn "Docker installed but daemon is not running. Trying to start it..."
+    if command -v systemctl >/dev/null 2>&1; then
+      systemctl enable --now docker || die "Failed to start docker via systemctl."
+    elif command -v service >/dev/null 2>&1; then
+      service docker start || die "Failed to start docker via service."
+    else
+      die "Docker installed but daemon not running and no init system detected. Start it manually."
+    fi
+    # Give the daemon a moment to come up.
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      docker info >/dev/null 2>&1 && break
+      sleep 1
+    done
+  fi
+  if ! docker info >/dev/null 2>&1; then
+    die "Docker installed but the daemon is still not responding."
+  fi
+  ok "Docker installed and running"
+}
+
 cmd_install() {
-  step "1/7  Verifying prerequisites"
+  step "0/7  Verifying prerequisites (auto-install Docker if missing)"
+  _ensure_docker
   command -v docker >/dev/null || die "Missing dependency: docker"
   if ! docker info >/dev/null 2>&1; then
     die "Docker daemon is not reachable. Is Docker running?"
