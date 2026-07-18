@@ -25,7 +25,6 @@ The minimal install path — zero env vars required:
 ```bash
 git clone https://github.com/asotonet/smartolt-automate-installer
 cd smartolt-automate-installer
-git checkout v0.4.7  # pin to a known-good installer version
 ./smartolt.sh install --yes
 ```
 
