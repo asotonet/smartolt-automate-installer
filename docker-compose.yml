@@ -165,7 +165,7 @@ services:
       - "traefik.http.services.frontend.loadbalancer.server.port=80"
 
   traefik:
-    image: ${PROXY_IMAGE:-asoton/smartolt-automate-traefik:v0.5.0}
+    image: ${PROXY_IMAGE:-asoton/smartolt-automate-traefik:v0.5.2}
     pull_policy: ${PULL_POLICY:-always}
     container_name: smartolt-automate-traefik
     restart: unless-stopped
@@ -174,6 +174,12 @@ services:
       SMARTOLT_PUBLIC_DOMAIN: "${SMARTOLT_PUBLIC_DOMAIN:-}"
       ACME_EMAIL: "${SMARTOLT_LETSENCRYPT_EMAIL:-admin@example.com}"
       DASHBOARD: "${TRAEFIK_DASHBOARD:-false}"
+      # Force the Docker API protocol version. Traefik's bundled docker
+      # client defaults to API v1.24, but modern Docker Engines expose
+      # v1.40+. Pinning to a current version keeps the docker provider
+      # working without rebuilding Traefik. Traefik ignores env vars
+      # it doesn't understand, so this is safe to set unconditionally.
+      DOCKER_API_VERSION: "1.43"
     volumes:
       # Traefik needs the Docker socket to watch for new containers and
       # read their labels. Same trade-off as the previous certbot setup.

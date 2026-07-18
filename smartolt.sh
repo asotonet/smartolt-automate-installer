@@ -115,7 +115,7 @@ if [[ -f .env ]]; then
 fi
 
 # ─── shared helpers ──────────────────────────────────────────────────────────
-DEFAULT_IMAGE_TAG="${SMARTOLT_IMAGE_TAG:-v0.5.0}"
+DEFAULT_IMAGE_TAG="${SMARTOLT_IMAGE_TAG:-v0.5.2}"
 DOCKERHUB_NAMESPACE="${DOCKERHUB_NAMESPACE:-asoton}"
 COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-smartolt_api_automate}"
 export COMPOSE_PROJECT_NAME
