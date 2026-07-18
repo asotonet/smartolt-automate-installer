@@ -189,6 +189,25 @@ services:
     depends_on:
       - frontend
       - web
+    # Catch-all routers for local testing (when SMARTOLT_PUBLIC_DOMAIN
+    # is empty). They match Host=localhost and Host=127.0.0.1 — the most
+    # common browser targets on a local install. When the operator sets
+    # SMARTOLT_PUBLIC_DOMAIN, the per-container routers (frontend /
+    # web-api) take over and these become no-ops.
+    #
+    # The router points at the existing 'frontend' service that the
+    # frontend container already declares via its own labels, so we
+    # don't need to re-declare it here.
+    labels:
+      - "traefik.enable=${TRAEFIK_ENABLE:-false}"
+      - "traefik.docker.network=smartolt_api_automate_default"
+      - "traefik.http.routers.localhost.rule=Host(`localhost`) || Host(`127.0.0.1`)"
+      - "traefik.http.routers.localhost.entrypoints=websecure"
+      - "traefik.http.routers.localhost.tls=true"
+      - "traefik.http.routers.localhost.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.localhost.service=frontend@docker"
+      - frontend
+      - web
 
 volumes:
   logs:
