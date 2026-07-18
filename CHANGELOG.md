@@ -5,6 +5,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.4] — 2026-07-17
+
+### Changed
+- **Traefik defaultGeneratedCert for instant HTTPS**: replaced the
+  planned `tls.stores.default.defaultCertificate` fallback (which
+  Traefik 3.1.x silently ignores) with `defaultGeneratedCert`. This
+  causes Traefik to auto-generate a self-signed cert at startup for
+  the configured domain. The cert is served immediately while ACME
+  works in the background; once Let's Encrypt issues the real cert
+  for `SMARTOLT_PUBLIC_DOMAIN`, Traefik transparently switches over.
+- Operator-facing behavior:
+  - **First ~30s after start** (or until DNS is properly pointed): browsers
+    see a self-signed cert warning, but HTTPS works.
+  - **Once ACME succeeds**: browser warning disappears, real cert is
+    served automatically. No restart required.
+- The `scripts/ssl/` directory is removed (was unused already).
+
 ## [0.4.3] — 2026-07-17
 
 ### Changed

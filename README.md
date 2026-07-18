@@ -32,7 +32,7 @@ before closing the shell. The stack is now running on:
 - `http://localhost:8080/` — the frontend (React UI)
 - `http://localhost:8090/healthz` — backend core health
 - `http://localhost:8000/api/...` — direct web tier API access
-- `https://localhost/` — Traefik HTTPS proxy (self-signed cert until SMARTOLT_PUBLIC_DOMAIN is set; then real Let's Encrypt)
+- `https://localhost/` — Traefik HTTPS proxy (self-signed cert from boot; auto-switches to Let's Encrypt once SMARTOLT_PUBLIC_DOMAIN is set and DNS points at the host)
 
 If you want to pre-configure the SmartOLT tenant URL/API key and a known
 admin password before installing, edit `.env` and re-run:
@@ -129,7 +129,7 @@ Key variables:
 | `SMARTOLT_FRONTEND_IMAGE` | `asoton/smartolt-automate-frontend:v0.3.3` | Frontend image |
 | `PROXY_IMAGE` | `asoton/smartolt-automate-traefik:v0.4.3` | Traefik reverse proxy + ACME |
 | `PULL_POLICY` | `always` | `always` pulls on every `up`; `missing`/`if_not_present` honours local cache |
-| `SMARTOLT_PUBLIC_DOMAIN` | _(empty)_ | When set, Traefik issues a real Let's Encrypt cert via HTTP-01. The hostname's DNS A record MUST point at this host. |
+| `SMARTOLT_PUBLIC_DOMAIN` | _(empty)_ | When set, Traefik issues a real Let's Encrypt cert via HTTP-01. The hostname's DNS A record MUST point at this host. When empty, Traefik serves a self-signed cert (instant HTTPS, browser warning). |
 | `SMARTOLT_LETSENCRYPT_EMAIL` | `admin@example.com` | Email for ACME registration |
 | `TRAEFIK_DASHBOARD` | `false` | Set to `true` to enable Traefik's web dashboard on `:8081` |
 | `SSL_RENEW_HOUR` | `3,15` | Cron hours for the core's certbot-renew fallback. With Traefik, ACME HTTP-01 certs renew automatically; this is belt-and-suspenders. |
