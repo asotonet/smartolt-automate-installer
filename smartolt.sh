@@ -27,7 +27,7 @@
 #   SMARTOLT_ADMIN_PASSWORD     default: random 20-char (printed at end)
 #   SMARTOLT_BASE_URL           SmartOLT tenant URL (deferred to panel if empty)
 #   SMARTOLT_API_KEY            SmartOLT API key
-#   SMARTOLT_TIMEZONE           IANA tz, default: America/Bogota
+#   SCHEDULER_TIMEZONE         IANA tz, default: America/Costa_Rica
 #   SMARTOLT_HOUR_START         0-23, default: 2
 #   SMARTOLT_HOUR_END           0-23, default: 3
 #   SMARTOLT_PUBLIC_DOMAIN      enables HTTPS if set
@@ -107,15 +107,49 @@ if [[ $NONINTERACTIVE -eq 0 && ! -t 0 && ! -r /dev/tty ]]; then
 fi
 
 # ─── load .env (if present) so config flows into our defaults ──────────────
-# We load only if .env exists (no error if it doesn't). Anything the
-# operator set explicitly in the shell still wins (the load uses no -u to
-# ignore already-set variables, except for a few we want to honor from
-# .env even when the shell has a value).
+# We load only if .env exists (no error if it doesn't).
+#
+# Shell-exported vars WIN over .env values. A plain `set -a; source;
+# set +a` would let .env overwrite the shell — e.g. an empty
+# `SMARTOLT_DEPLOY_PROFILE=` in the freshly-bootstrapped .env
+# clobbers the operator's shell export. We snapshot the shell's
+# values for every .env key, source the file, then re-apply the
+# shell snapshot on top of the .env values.
 if [[ -f .env ]]; then
+  # Build a snapshot of operator shell exports for keys defined in
+  # .env. We only need to remember keys that the operator actually
+  # had set in the shell — the rest are owned by .env.
+  declare -A _SHELL_SNAPSHOT=()
+  _loader_shell_val=""
+  while IFS= read -r line; do
+    # Skip comments and blank lines.
+    [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+    # Key is everything up to the first '='.
+    key="${line%%=*}"
+    # Only accept names that are valid POSIX shell identifiers.
+    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    # Was the operator exporting this in the shell? If so, remember
+    # the value. (Indirect lookup: ${!key} would lose values with
+    # funny chars, but the value here is just for re-export and
+    # sanity.)
+    _loader_shell_val="${!key-__unset__}"
+    if [[ "$_loader_shell_val" != "__unset__" ]]; then
+      _SHELL_SNAPSHOT["$key"]="$_loader_shell_val"
+    fi
+  done < .env
   set -a
   # shellcheck disable=SC1091
   source .env
   set +a
+  # Restore operator exports on top of .env values.
+  for key in "${!_SHELL_SNAPSHOT[@]}"; do
+    # Skip names that aren't valid shell identifiers (shouldn't
+    # happen given the parse above, but defensive).
+    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    printf -v escaped '%q' "${_SHELL_SNAPSHOT[$key]}"
+    eval "export $key=$escaped"
+  done
+  unset _SHELL_SNAPSHOT
 fi
 
 # Resolve the deploy profile (lan / https-public /
@@ -571,6 +605,21 @@ cmd_install() {
   fi
   [[ -z "$OVERWRITE_ENV" ]] && OVERWRITE_ENV="n"
 
+  # If the compose stack is already up from a previous run, tear it
+  # down so the wizard's `up` doesn't fail with a container-name
+  # conflict. This handles stale installs (half-finished wizard,
+  # aborted pull, recovered crash) where the operator reruns
+  # ./smartolt.sh install on a host that still has containers from
+  # the previous attempt. Skip if no .env exists yet (first-time
+  # install on a clean host).
+  if [[ -f .env ]]; then
+    if docker ps -a --format '{{.Names}}' 2>/dev/null \
+        | grep -qx "smartolt-automate"; then
+      warn "Existing smartolt-automate container found; running 'docker compose down' before reinstall."
+      docker compose --project-name "$COMPOSE_PROJECT_NAME" down --remove-orphans 2>&1 | tail -3 || true
+    fi
+  fi
+
   # First-time install: copy .env.example to .env so all env-driven
   # defaults are populated. The wizard then re-writes the user-specific
   # values on top of this baseline.
@@ -694,15 +743,25 @@ cmd_install() {
   fi
 
   step "5/7  Scheduler window"
-  TZ_NAME="${SMARTOLT_TIMEZONE:-}"
-  [[ -z "$TZ_NAME" ]] && { if [[ $NONINTERACTIVE -eq 1 ]]; then TZ_NAME="America/Bogota"; else
-    read -r -p "    IANA timezone [America/Bogota]: " TZ_NAME; TZ_NAME="${TZ_NAME:-America/Bogota}"; fi
-  }
-  SCHED_HOUR_START="${SMARTOLT_HOUR_START:-}"
+  # Read the TZ from the env var the operator's .env actually
+  # exposes (SCHEDULER_TIMEZONE). The previous name was
+  # SMARTOLT_TIMEZONE, which the .env.example no longer ships —
+  # reading the right name avoids the wizard silently defaulting
+  # to America/Bogota on a stack whose .env has Costa Rica.
+  TZ_NAME="${SCHEDULER_TIMEZONE:-}"
+  if [[ -z "$TZ_NAME" ]]; then
+    if [[ $NONINTERACTIVE -eq 1 ]]; then
+      TZ_NAME="America/Costa_Rica"
+    else
+      read -r -p "    IANA timezone [America/Costa_Rica]: " TZ_NAME
+      TZ_NAME="${TZ_NAME:-America/Costa_Rica}"
+    fi
+  fi
+  SCHED_HOUR_START="${SCHEDULER_HOUR_START:-}"
   [[ -z "$SCHED_HOUR_START" ]] && { if [[ $NONINTERACTIVE -eq 1 ]]; then SCHED_HOUR_START="2"; else
     read -r -p "    Window START hour [2]: " SCHED_HOUR_START; SCHED_HOUR_START="${SCHED_HOUR_START:-2}"; fi
   }
-  SCHED_HOUR_END="${SMARTOLT_HOUR_END:-}"
+  SCHED_HOUR_END="${SCHEDULER_HOUR_END:-}"
   [[ -z "$SCHED_HOUR_END" ]] && { if [[ $NONINTERACTIVE -eq 1 ]]; then SCHED_HOUR_END="3"; else
     read -r -p "    Window END hour [3]: " SCHED_HOUR_END; SCHED_HOUR_END="${SCHED_HOUR_END:-3}"; fi
   }
@@ -778,15 +837,25 @@ cmd_install() {
     ok "Created .env"
   fi
 
-  # Resolve the proxy image. If the operator already set PROXY_IMAGE in
-  # .env (e.g. to pin a hotfix tag like :v0.4.10-traefik-fix for a
-  # known Docker Engine 29 compat issue), keep it; otherwise use the
-  # default tag. Same for SMARTOLT_IMAGE / SMARTOLT_FRONTEND_IMAGE —
-  # the operator's pin is respected on re-install.
+  # Resolve the proxy image. Order of precedence:
+  #   1. Operator's shell export (PROXY_IMAGE=:hotfix — survives the
+  #      .env source that happens at the top of the script because
+  #      the snapshot-restore in the loader pins shell values above
+  #      .env values).
+  #   2. Value already in .env from a prior install.
+  #   3. The default tag (${IMAGE_TAG}).
   _resolve_image() {
     local key="$1" default="$2"
-    local v
-    v="$(grep -E "^${key}=" .env | head -1 | cut -d= -f2- | sed -E 's/^"(.*)"$/\1/')"
+    local v=""
+    # 1. Shell value (already restored on top of the .env source by
+    #    the snapshot-restore loader at the top of the script).
+    if [[ -n "${!key+x}" && -n "${!key}" ]]; then
+      v="${!key}"
+    fi
+    # 2. .env value, only if shell didn't have one.
+    if [[ -z "$v" ]]; then
+      v="$(grep -E "^${key}=" .env | head -1 | cut -d= -f2- | sed -E 's/^"(.*)"$/\1/')"
+    fi
     # An empty value, the literal placeholder, or one that still
     # references the default IMAGE_TAG is treated as "use default".
     if [[ -z "$v" ]] || [[ "$v" == *"v0.3.3"* ]]; then
