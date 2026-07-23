@@ -58,6 +58,15 @@ services:
       SMARTOLT_API_KEY: "${SMARTOLT_API_KEY:-}"
       INITIAL_ADMIN_USERNAME: "${INITIAL_ADMIN_USERNAME:?Set INITIAL_ADMIN_USERNAME in .env}"
       INITIAL_ADMIN_PASSWORD: "${INITIAL_ADMIN_PASSWORD:?Set INITIAL_ADMIN_PASSWORD in .env}"
+      # Internal URL of the backend (port 8080 on the `smartolt-automate`
+      # service in the compose network). The web tier proxies requests
+      # like /api/service/status to this URL to forward to the backend
+      # scheduler. The default in smartolt_automate/config.py is
+      # http://127.0.0.1:8080, which inside the web container has no
+      # listener (the health server only runs in the backend container)
+      # and surfaces as 'upstream unreachable' in the Service Status
+      # card. Pin to the compose DNS name.
+      WEB_INTERNAL_BASE_URL: "http://smartolt-automate:8080"
       PROXY_HTTPS_PORT: "${PROXY_HTTPS_PORT:-443}"
       COMPOSE_PROJECT_NAME: "${COMPOSE_PROJECT_NAME:-smartolt_api_automate}"
       PROXY_SERVICE_NAME: "${PROXY_SERVICE_NAME:-smartolt-automate-traefik}"
