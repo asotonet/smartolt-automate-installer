@@ -45,7 +45,11 @@ set -eo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-CMD="${1:-status}"
+# The subcommand is mandatory. We do NOT default to 'status' — that
+# used to silently run `./smartolt.sh` and print a status table, which
+# obscured typos like `./smartolt.sh isntall`. An empty CMD is caught
+# by the dispatch block below, which prints usage and exits non-zero.
+CMD="${1:-}"
 shift || true
 
 # ─── output helpers ─────────────────────────────────────────────────────────
@@ -92,7 +96,7 @@ while [[ $i -lt ${#parse_args[@]} ]]; do
     --keep-data)      KEEP_DATA=1 ;;
     --non-interactive) NONINTERACTIVE=1 ;;
     --no-follow)      NO_FOLLOW=1 ;;
-    --help|-h)        sed -n '2,28p' "$0"; exit 0 ;;
+    --help|-h)        : ;;  # let the dispatch block handle --help / -h
     *)                SUB_ARGS+=("$a") ;;
   esac
   i=$((i+1))
@@ -445,24 +449,39 @@ cmd_install() {
     if ! PROFILE="$(_profile_normalize "$PROFILE_RAW")"; then
       die "Invalid SMARTOLT_DEPLOY_PROFILE='$PROFILE_RAW'. Valid: lan, https-public, https-behind-external-proxy, frontend-only"
     fi
+    ok "Profile: $PROFILE (from SMARTOLT_DEPLOY_PROFILE env / .env)."
   elif [[ $NONINTERACTIVE -eq 1 ]]; then
     PROFILE="lan"
     ok "Profile: lan (auto-selected; pass SMARTOLT_DEPLOY_PROFILE=... to override)."
   else
-    printf "    Pick a deploy profile:\n"
-    printf "      [1] lan                              — frontend on :8080 LAN, Traefik runs but doesn't route (self-signed :443)\n"
-    printf "      [2] https-public                     — frontend loopback, Traefik issues Let's Encrypt cert for SMARTOLT_PUBLIC_DOMAIN\n"
-    printf "      [3] https-behind-external-proxy      — frontend loopback, NO Traefik; you run Caddy/Cloudflare Tunnel/nginx outside the stack\n"
-    printf "      [4] frontend-only                    — frontend on :8080 LAN, NO Traefik, no HTTPS\n"
-    printf "    Profile [1]: "
-    read -r ans
-    case "${ans:-1}" in
-      2|https-public) PROFILE="https-public" ;;
-      3|https-behind-external-proxy|external) PROFILE="https-behind-external-proxy" ;;
-      4|frontend-only|direct) PROFILE="frontend-only" ;;
-      1|lan|"") PROFILE="lan" ;;
-      *) die "Invalid selection: $ans" ;;
-    esac
+    PROFILE=""
+    while :; do
+      printf "\n    Pick a deploy profile:\n"
+      printf "      [1] lan                              — frontend on :8080 LAN, Traefik runs but doesn't route (self-signed :443)\n"
+      printf "      [2] https-public                     — frontend loopback, Traefik issues a LE cert for SMARTOLT_PUBLIC_DOMAIN\n"
+      printf "      [3] https-behind-external-proxy      — frontend loopback, NO Traefik; you run Caddy/Cloudflare Tunnel/nginx outside the stack\n"
+      printf "      [4] frontend-only                    — frontend on :8080 LAN, NO Traefik, no HTTPS\n"
+      printf "    Profile [1]: "
+      read -r ans
+      case "${ans:-1}" in
+        2|https-public) PROFILE="https-public" ;;
+        3|https-behind-external-proxy|external) PROFILE="https-behind-external-proxy" ;;
+        4|frontend-only|direct) PROFILE="frontend-only" ;;
+        1|lan|"") PROFILE="lan" ;;
+        *) warn "Invalid selection: '$ans'. Try again."; PROFILE=""; continue ;;
+      esac
+      # Confirmation loop: if the operator types anything other than 'y'
+      # (or empty for default) we redisplay the menu and ask again. This
+      # avoids silent typos like 'https-pubic' or wrong-arrow hits.
+      printf "    Confirm '%s'? [Y/n/retry]: " "$PROFILE"
+      read -r confirm_ans
+      case "${confirm_ans:-Y}" in
+        Y|y|yes|"") break ;;
+        n|N|no)    PROFILE=""; continue ;;
+        r|R|retry|back) PROFILE=""; continue ;;
+        *)         warn "Invalid answer: '$confirm_ans'. Re-showing menu."; PROFILE=""; continue ;;
+      esac
+    done
   fi
   SMARTOLT_DEPLOY_PROFILE="$PROFILE"
   export SMARTOLT_DEPLOY_PROFILE
@@ -900,6 +919,44 @@ cmd_destroy() {
   ok "Destroy complete."
 }
 
+# ─── usage ────────────────────────────────────────────────────────────────────
+# Printed when the operator runs the script with no subcommand (mandatory)
+# or with --help/-h/help. Same content either way; the exit code differs:
+#   - missing subcommand → exit 2 (suggests incorrect usage, like getopt)
+#   - explicit --help     → exit 0 (operator asked for it)
+_print_usage() {
+  cat <<'USAGE'
+Usage: ./smartolt.sh <command> [flags]
+
+Commands:
+  install      First-time deploy: bootstrap .env, pull images, start the stack.
+  deploy       Re-apply 'docker compose up -d' using the current .env / profile.
+  status       Show container status + which profile is active.
+  logs [svc]   Tail logs of one or all services (-f follow).
+  renew        Force a cert-renew check now (debug).
+  upgrade [v]  Pull new images at the version in .env (or an explicit tag).
+  destroy      Nuke everything the installer created (containers, volumes,
+               network, .env). Use --keep-data to preserve the database.
+
+Common flags:
+  -y, --yes         Skip confirmation prompts.
+      --dry-run     Print the plan, change nothing.
+      --non-interactive  Don't prompt; use env vars + defaults.
+      --keep-images / --keep-data   (destroy only)
+
+Run './smartolt.sh <command> --help' for command-specific options.
+
+Examples:
+  ./smartolt.sh install --yes
+  SMARTOLT_PUBLIC_DOMAIN=panel.example.com ./smartolt.sh install --yes
+  ./smartolt.sh status
+  ./smartolt.sh logs smartolt-automate-web --no-follow
+  ./smartolt.sh deploy
+  ./smartolt.sh upgrade v0.5.0
+  ./smartolt.sh destroy -y --keep-data
+USAGE
+}
+
 # ─── dispatch ───────────────────────────────────────────────────────────────
 case "$CMD" in
   install)   cmd_install ;;
@@ -909,7 +966,14 @@ case "$CMD" in
   renew)     cmd_renew ;;
   upgrade)   cmd_upgrade "${SUB_ARGS[@]}" ;;
   destroy)   cmd_destroy ;;
-  help|--help|-h|"")
-    sed -n '2,12p' "$0"; exit 0 ;;
-  *)  err "Unknown subcommand: $CMD"; printf "Run './smartolt.sh help' for usage.\n"; exit 1 ;;
+  help|--help|-h)
+    _print_usage; exit 0 ;;
+  "")
+    err "Missing subcommand."
+    _print_usage
+    exit 2 ;;
+  *)
+    err "Unknown subcommand: $CMD"
+    _print_usage
+    exit 1 ;;
 esac
