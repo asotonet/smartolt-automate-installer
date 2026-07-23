@@ -1,11 +1,13 @@
 # SmartOLT Automate Installer
 
-One-command installer for [SmartOLT Automate](https://github.com/asotonet/smartolt-automate). The script pulls prebuilt Docker images, generates `.env`, validates the config, and brings the stack online.
+> **Idioma**: [English version](docs/README.en.md) · Español (este archivo)
 
-This repo is public and contains no application source — the images come from Docker Hub. Full source lives in the [upstream project](https://github.com/asotonet/smartolt-automate).
+Instalador one-command para [SmartOLT Automate](https://github.com/asotonet/smartolt-automate). El script baja imágenes Docker preconstruidas, genera `.env`, valida la configuración y levanta el stack completo.
+
+Este repo es público y no contiene código fuente de la aplicación — las imágenes vienen de Docker Hub. El código fuente completo está en el [upstream project](https://github.com/asotonet/smartolt-automate).
 
 <p align="center">
-  <img src="docs/panel-overview.png" alt="SmartOLT Automate dashboard" width="900">
+  <img src="docs/panel-overview.png" alt="Panel de SmartOLT Automate" width="900">
 </p>
 
 ## Quick start
@@ -14,35 +16,35 @@ This repo is public and contains no application source — the images come from 
 git clone https://github.com/asotonet/smartolt-automate-installer
 cd smartolt-automate-installer
 cp .env.example .env
-$EDITOR .env          # set SMARTOLT_DEPLOY_PROFILE, domain (if any), admin password
+$EDITOR .env          # configurar SMARTOLT_DEPLOY_PROFILE, dominio (si aplica), password admin
 ./smartolt.sh install --yes
 ```
 
-The first run prints the auto-generated admin password at the end (if you didn't set `INITIAL_ADMIN_PASSWORD` in `.env`). Save it before closing the shell.
+El primer run imprime el password admin auto-generado al final (si no seteaste `INITIAL_ADMIN_PASSWORD` en `.env`). Guardalo antes de cerrar la shell.
 
-After install:
+Después del install:
 
-- `./smartolt.sh status` — container health
-- `./smartolt.sh logs` — tail logs of all services
-- `./smartolt.sh deploy` — re-apply after editing `.env` (image pins, profile, domain, scheduler window)
-- `./smartolt.sh destroy` — nuke everything the installer created
+- `./smartolt.sh status` — estado de los contenedores
+- `./smartolt.sh logs` — tail de logs de todos los servicios
+- `./smartolt.sh deploy` — re-aplicar cambios después de editar `.env` (image pins, profile, domain, ventana del scheduler)
+- `./smartolt.sh destroy` — borrar todo lo que el installer creó
 
 ## Deploy profiles
 
-The single knob is `SMARTOLT_DEPLOY_PROFILE` in `.env`. It controls three things: how the frontend is exposed, whether Traefik runs, and where HTTPS comes from.
+La única perilla es `SMARTOLT_DEPLOY_PROFILE` en `.env`. Controla tres cosas: cómo se expone el frontend, si Traefik corre, y de dónde viene el HTTPS.
 
-| Profile | Frontend on host | Traefik | HTTPS | Use when |
+| Profile | Frontend en host | Traefik | HTTPS | Cuándo usarlo |
 |---|---|---|---|---|
-| `lan` (default) | `:8080` on `0.0.0.0` | runs but doesn't route | self-signed `:443` | LAN testing |
-| `https-public` | loopback `:8080` | runs, routes by labels | Let's Encrypt via ACME HTTP-01 | Production with a public domain |
-| `https-behind-external-proxy` | loopback `:8080` | **doesn't run** | handled by your external proxy | Cloudflare Tunnel / Caddy / nginx in front of the host |
-| `frontend-only` | `:8080` on `0.0.0.0` | **doesn't run** | none | Lowest footprint; LAN only, no HTTPS |
+| `lan` (default) | `:8080` en `0.0.0.0` | corre pero no enruta | self-signed `:443` | Testing en LAN |
+| `https-public` | loopback `:8080` | corre, enruta por labels | Let's Encrypt vía ACME HTTP-01 | Producción con dominio público |
+| `https-behind-external-proxy` | loopback `:8080` | **no corre** | manejado por tu proxy externo | Cloudflare Tunnel / Caddy / nginx delante del host |
+| `frontend-only` | `:8080` en `0.0.0.0` | **no corre** | ninguno | Mínimo footprint; LAN only, sin HTTPS |
 
-If `SMARTOLT_DEPLOY_PROFILE` is empty in `.env`, the install wizard infers: `SMARTOLT_PUBLIC_DOMAIN` set → `https-public`, otherwise `lan`.
+Si `SMARTOLT_DEPLOY_PROFILE` está vacío en `.env`, el wizard infiere: `SMARTOLT_PUBLIC_DOMAIN` seteado → `https-public`, vacío → `lan`.
 
-The wizard handles everything from there. See [`.env.example`](.env.example) for the full list of knobs.
+El wizard hace el resto. Ver [`.env.example`](.env.example) para la lista completa de variables.
 
-For `https-behind-external-proxy`, point your external proxy at `http://127.0.0.1:8080`:
+Para `https-behind-external-proxy`, apuntá tu proxy externo a `http://127.0.0.1:8080`:
 
 ```caddyfile
 # /etc/caddy/Caddyfile
@@ -51,87 +53,88 @@ panel.example.com {
 }
 ```
 
-## Changing the profile after install
+## Cambiar el profile después del install
 
-Edit `SMARTOLT_DEPLOY_PROFILE` in `.env` and run `./smartolt.sh deploy`. The deploy command handles the cross-profile transition automatically: if a Traefik container exists from a previous profile and the new one skips it, the deploy removes the orphan first so you don't end up with a Traefik running on `:80`/`:443` when the active profile says it shouldn't.
+Editá `SMARTOLT_DEPLOY_PROFILE` en `.env` y corré `./smartolt.sh deploy`. El deploy maneja automáticamente la transición entre profiles: si existía un container Traefik de un profile anterior y el nuevo lo excluye, el deploy lo borra primero para que no quede un Traefik huérfano corriendo en `:80`/`:443`.
 
-## What the script does
+## Qué hace el script
 
-`./smartolt.sh install --yes` walks the wizard (or skips prompts in non-interactive mode), then:
+`./smartolt.sh install --yes` ejecuta el wizard (o skip prompts en non-interactive mode):
 
-1. Verifies `docker` + `docker compose` are present.
-2. Bootstraps `.env` from `.env.example` if missing.
-3. Asks (or infers) the deploy profile.
-4. Asks for admin credentials and the SmartOLT tenant URL/key (or reads from env).
-5. Asks the scheduler window (timezone + hour range).
-6. If the profile needs HTTPS, asks for the public domain and ACME email.
-7. Validates every required var for the chosen profile (with type, description, and copy-paste example for missing/malformed values).
-8. Writes `.env`, runs `docker compose pull` + `up -d`, and probes the healthcheck.
+1. Verifica que `docker` + `docker compose` estén disponibles.
+2. Bootstrap de `.env` desde `.env.example` si falta.
+3. Pregunta (o infiere) el deploy profile.
+4. Pregunta credenciales admin y el SmartOLT tenant URL/key (o los lee del env).
+5. Pregunta la ventana del scheduler (timezone + rango horario).
+6. Si el profile necesita HTTPS, pregunta el dominio público y el email ACME.
+7. Valida cada variable requerida del profile (con tipo, descripción y ejemplo copy-paste para vars faltantes o mal formadas).
+8. Escribe `.env`, corre `docker compose pull` + `up -d`, y prueba el healthcheck.
 
-The wizard re-asks the profile with confirmation + retry if you mistype — no more silent typos landing you in the wrong mode.
+El wizard re-pregunta el profile con confirmación + retry si tipeás mal — no más typos silenciosos que caen en el modo equivocado.
 
-## Day-to-day
+## Operación del día a día
 
 ```bash
-./smartolt.sh status         # container health + profile + healthcheck URLs
-./smartolt.sh logs           # tail all services
-./smartolt.sh logs web       # tail one service
-./smartolt.sh deploy         # re-apply after editing .env
-./smartolt.sh upgrade        # pull new images at the version in .env
-./smartolt.sh upgrade v0.5.0 # upgrade to a specific tag
-./smartolt.sh destroy -y     # remove everything the installer created
+./smartolt.sh status         # estado de contenedores + profile + healthcheck URLs
+./smartolt.sh logs           # tail de todos los servicios
+./smartolt.sh logs web       # tail de un servicio
+./smartolt.sh deploy         # re-aplicar después de editar .env
+./smartolt.sh upgrade        # bajar imágenes nuevas a la versión de .env
+./smartolt.sh upgrade v0.5.0 # upgrade a un tag específico
+./smartolt.sh destroy -y     # borrar todo lo que el installer creó
 ```
 
-Common flags:
+Flags comunes:
 
-- `-y, / --yes` — skip confirmation prompts (`install`, `destroy`, `upgrade`)
-- `--dry-run` — print the plan without changing anything
-- `--keep-images` / `--keep-data` (`destroy` only)
+- `-y, / --yes` — skip de prompts de confirmación (`install`, `destroy`, `upgrade`)
+- `--dry-run` — muestra el plan sin cambiar nada
+- `--keep-images` / `--keep-data` (`destroy` solo)
 
-## Configuration
+## Configuración
 
-Everything lives in `.env`. Edit it and run `./smartolt.sh deploy` to apply.
+Todo vive en `.env`. Editá y corré `./smartolt.sh deploy` para aplicar.
 
-The installer respects any image pin you set in `.env` (e.g. `PROXY_IMAGE=asoton/smartolt-automate-traefik:v0.4.10-traefik-fix`) across re-installs — the wizard won't clobber it with the default tag.
+El installer respeta cualquier pin de imagen que pongas en `.env` (ej. `PROXY_IMAGE=asoton/smartolt-automate-traefik:v0.4.10-traefik-fix`) entre re-installs — el wizard no lo sobreescribe con el tag default.
 
-For advanced knobs (batching, JWT, internal API token, etc.) the install wizard writes sane defaults. Override per-host via a `docker-compose.override.yml` mounted on top of the service that owns it.
+Para knobs avanzados (batching, JWT, internal API token, etc.) el wizard escribe defaults razonables. Override por host vía un `docker-compose.override.yml` montado encima del servicio que corresponda.
 
-## Requirements
+## Requisitos
 
-- Docker Engine 24+ with Compose v2
-- 1 vCPU + 512 MB RAM available
-- Outbound HTTPS (port 443) to `registry-1.docker.io`
-- For HTTPS: ports 80 and 443 free on the host, a domain with an `A`/`AAAA` record pointing at the server
+- Docker Engine 24+ con Compose v2
+- 1 vCPU + 512 MB RAM disponibles
+- Salida HTTPS (puerto 443) a `registry-1.docker.io`
+- Para HTTPS: puertos 80 y 443 libres en el host, un dominio con un `A`/`AAAA` apuntando al server
 
 ## Troubleshooting
 
-| Symptom | Cause | Fix |
+| Síntoma | Causa | Fix |
 |---|---|---|
-| `Profile '<name>' requires the following vars in .env that are missing or empty:` followed by a per-var block | The active profile needs vars that are empty or malformed in `.env`. The validator lists every missing var at once with its type, description, and a copy-paste example. | Edit `.env` and set the listed vars, then `./smartolt.sh deploy`. The validator catches: empty values, the `change-me-now` password sentinel, FQDNs without a dot or with whitespace, emails without `@` or `.`, images without `:tag`, passwords shorter than 8 characters. |
-| Traefik logs `client version 1.24 is too old` on Ubuntu 24.04+ / Docker Engine 29+ | The bundled Traefik in `:v0.4.9` has a docker client pinned to API v1.24, which the modern daemon rejects. | Pin `PROXY_IMAGE=asoton/smartolt-automate-traefik:latest` in `.env` and `./smartolt.sh deploy`. The `:latest` tag ships Traefik 3.7+, which negotiates a modern API version. |
-| Scheduler runs at the wrong hour after install | The wizard writes `SCHEDULER_TIMEZONE` to `.env`, but the core scheduler actually reads its timezone from the bind-mounted `configs/global.yaml`. | Edit `configs/global.yaml` to match `SCHEDULER_TIMEZONE`. The core hot-reloads it within ~2s. |
-| Changed `SMARTOLT_DEPLOY_PROFILE` but Traefik container is still running | (Older versions only — current deploy handles this automatically by removing the orphan Traefik container before the new `up`.) | Run `./smartolt.sh deploy` — the deploy command detects the cross-profile transition. |
-| `docker compose pull` reports `not found` for a tag that exists on Docker Hub | Stale registry cache. | Wait 5–10 minutes and retry, or pull manually (`docker pull asoton/smartolt-automate-traefik:latest`) before `./smartolt.sh deploy`. |
-| Traefik container shows `unhealthy` on Windows + Docker Desktop | Traefik's `docker` provider can't read the Windows named pipe. | Expected on Windows. Use `http://localhost:8080/` with `EXPOSE_FRONTEND_DIRECTLY=true` (the `lan` or `frontend-only` profile) to access the UI directly. |
+| `Profile '<name>' requires the following vars in .env that are missing or empty:` seguido de un bloque por variable | El profile activo necesita vars que están vacías o mal formadas en `.env`. El validador lista todas las vars faltantes en un solo run con su tipo, descripción y ejemplo copy-paste. | Editá `.env` y seteá las vars listadas, después `./smartolt.sh deploy`. El validador detecta: valores vacíos, el sentinel `change-me-now` del password, FQDNs sin punto o con espacios, emails sin `@` o `.`, imágenes sin `:tag`, passwords con menos de 8 caracteres. |
+| Traefik loguea `client version 1.24 is too old` en Ubuntu 24.04+ / Docker Engine 29+ | El Traefik en `:v0.4.9` tiene un cliente Docker pineado a API v1.24, que el daemon moderno rechaza. | Pinear `PROXY_IMAGE=asoton/smartolt-automate-traefik:latest` en `.env` y `./smartolt.sh deploy`. El tag `:latest` trae Traefik 3.7+, que negocia una versión moderna de API. |
+| El scheduler corre a la hora equivocada después del install | El wizard escribe `SCHEDULER_TIMEZONE` en `.env`, pero el core scheduler en realidad lee su timezone del `configs/global.yaml` bind-mounted. | Editá `configs/global.yaml` para que matchee `SCHEDULER_TIMEZONE`. El core hot-reloada en ~2s. |
+| Cambié `SMARTOLT_DEPLOY_PROFILE` pero el container Traefik sigue corriendo | (Solo versiones viejas — el deploy actual maneja esto automáticamente borrando el Traefik huérfano antes del nuevo `up`.) | Corré `./smartolt.sh deploy` — el deploy detecta la transición entre profiles. |
+| `docker compose pull` reporta `not found` para un tag que existe en Docker Hub | Cache stale del registry. | Esperá 5–10 minutos y reintentar, o bajalo manualmente (`docker pull asoton/smartolt-automate-traefik:latest`) antes de `./smartolt.sh deploy`. |
+| El container Traefik muestra `unhealthy` en Windows + Docker Desktop | El `docker` provider de Traefik no puede leer el named pipe de Windows. | Esperado en Windows. Usá `http://localhost:8080/` con `EXPOSE_FRONTEND_DIRECTLY=true` (el profile `lan` o `frontend-only`) para acceder a la UI directamente. |
 
-## Publishing a new release
+## Publicar un release
 
-Maintainers only. `scripts/release.sh` pulls the 3 images from Docker Hub, retags as `:latest`, and pushes both:
+Solo maintainers. `scripts/release.sh` baja las 3 imágenes de Docker Hub, las retaguea como `:latest` y las pushea:
 
 ```bash
-./scripts/release.sh                    # tag from .env
-./scripts/release.sh v0.5.0            # explicit tag
-./scripts/release.sh v0.5.0 --skip-pull  # use local cache
-./scripts/release.sh --check           # verify a tag is live (no push)
+./scripts/release.sh                    # tag desde .env
+./scripts/release.sh v0.5.0            # tag explícito
+./scripts/release.sh v0.5.0 --skip-pull  # usar cache local
+./scripts/release.sh --check           # verificar que un tag esté live (no push)
 ```
 
-Logs in via `~/.docker/config.json`. Override with `DOCKERHUB_NAMESPACE=...`.
+Login en `~/.docker/config.json`. Override con `DOCKERHUB_NAMESPACE=...`.
 
-## Related
+## Links
 
-- [Upstream project](https://github.com/asotonet/smartolt-automate) — full source, CI, release pipeline
-- [SmartOLT API docs](https://smartolt.com/api-docs) (login required)
+- [Upstream project](https://github.com/asotonet/smartolt-automate) — código fuente completo
+- [SmartOLT API docs](https://smartolt.com/api-docs) (requiere login)
+- [README en inglés](docs/README.en.md)
 
-## License
+## Licencia
 
-MIT — see [LICENSE](./LICENSE).
+MIT — ver [LICENSE](./LICENSE).
