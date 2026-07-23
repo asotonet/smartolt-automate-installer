@@ -6,6 +6,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Per-profile .env validator**: `cmd_install` and `cmd_deploy` now
+  call `_validate_profile_env` after `_init_profile`. The validator
+  reads the active profile and checks every required var has a
+  non-empty value, plus a light format check (FQDNs need a dot,
+  emails need `@.` somewhere, images need a `:tag`, passwords need
+  at least 8 characters and not the `change-me-now` sentinel). On
+  failure it prints **every** missing var in one block, each with
+  its type (`username`, `password`, `FQDN`, `email`, `image`), a
+  one-line description, and a copy-paste-ready example
+  (`KEY=example value`). Exit code 1; no docker compose is invoked.
 - **Deploy profiles**: `SMARTOLT_DEPLOY_PROFILE` selects one of four
   named bundles (frontend exposure + Traefik presence + HTTPS source):
   - `lan` (default) — frontend on `:8080` LAN, Traefik runs but does

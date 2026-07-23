@@ -380,27 +380,172 @@ _ensure_docker() {
 # images and creating containers from defaults baked into
 # docker-compose.yml, then dies with a cryptic compose error.
 #
-# Returns 0 when .env exists AND has at least one expected key with a
-# non-empty value.
+# Returns 0 when .env exists as a file (and is non-empty). Deeper
+# content validation is done by _validate_profile_env(), which knows
+# the active profile's required-var list and produces a single error
+# listing every missing var plus a copy-paste example.
 _require_env() {
-  if [[ ! -f .env ]]; then
-    return 1
-  fi
-  # Treat 0-byte or whitespace-only files as missing.
-  if [[ ! -s .env ]] || [[ -z "$(tr -d '[:space:]' < .env)" ]]; then
-    return 1
-  fi
-  # At minimum, the wizard always writes SMARTOLT_IMAGE and
-  # INITIAL_ADMIN_USERNAME / INITIAL_ADMIN_PASSWORD. Any one of those
-  # being empty means the wizard didn't finish.
-  local key
-  for key in SMARTOLT_IMAGE INITIAL_ADMIN_USERNAME INITIAL_ADMIN_PASSWORD; do
-    local val
-    val="$(grep -E "^${key}=" .env | head -1 | cut -d= -f2- | sed -E 's/^"(.*)"$/\1/')"
-    if [[ -z "$val" ]]; then
-      return 1
-    fi
+  [[ -f .env ]] || return 1
+  # Treat 0-byte files as missing — the wizard may have crashed before
+  # writing anything. Comments-only files are accepted at this layer
+  # (deeper validation will report the missing keys).
+  [[ -s .env ]] || return 1
+  return 0
+}
+
+# ─── shared: per-profile .env validation ─────────────────────────────────────
+# The four profiles need different .env vars. This function reads the
+# active profile (via _init_profile / REPLY_PROFILE) and checks every
+# required var has a non-empty value. On failure, it prints the list
+# of missing vars with their description, type, and a copy-paste-ready
+# example line for .env, then exits 1.
+#
+# Validation rules per profile:
+#   common         every profile needs these
+#     SMARTOLT_IMAGE, SMARTOLT_FRONTEND_IMAGE
+#     INITIAL_ADMIN_USERNAME, INITIAL_ADMIN_PASSWORD (not 'change-me-now')
+#   lan            (no extras)
+#   https-public
+#     SMARTOLT_PUBLIC_DOMAIN    non-empty, no spaces, at least one dot
+#     SMARTOLT_LETSENCRYPT_EMAIL  contains '@' and a dot in the domain part
+#   https-behind-external-proxy
+#     (no extras; the external proxy is the operator's responsibility)
+#   frontend-only
+#     (no extras)
+#
+# PROXY_IMAGE is required when the profile needs Traefik (lan,
+# https-public). The wizard always writes it; we check it too so a
+# manual edit that wipes it is caught.
+#
+# Run this AFTER _init_profile and AFTER .env has been sourced.
+
+# Catalogue of vars: "KEY|DESCRIPTION|TYPE|EXAMPLE". Printed on missing.
+# TYPE is a one-word hint shown in the error: 'FQDN', 'email', 'image',
+# 'integer hour', 'IANA tz', 'username', 'password'. Operators see the
+# type so they know what shape the value should take.
+_PROFILE_REQUIRED_VARS=(
+  # Common — required for every profile.
+  "SMARTOLT_IMAGE|Backend + web-tier image (Docker Hub: asoton/smartolt-automate:<tag>)|image|asoton/smartolt-automate:v0.4.9"
+  "SMARTOLT_FRONTEND_IMAGE|Frontend image (Docker Hub: asoton/smartolt-automate-frontend:<tag>)|image|asoton/smartolt-automate-frontend:v0.4.9"
+  "INITIAL_ADMIN_USERNAME|Admin login created on first boot. After that, manage users from the panel.|username|admin"
+  "INITIAL_ADMIN_PASSWORD|Admin password for first boot. Must be >= 8 characters; the literal 'change-me-now' is a sentinel that auto-generates a random password and prints it.|password|MyStrongPass!2026"
+)
+
+# Reads a single key from .env (returns empty string if missing/blank).
+_env_value() {
+  local key="$1"
+  [[ -f .env ]] || return 0
+  local v
+  v="$(grep -E "^${key}=" .env | head -1 | cut -d= -f2- | sed -E 's/^"(.*)"$/\1/')"
+  printf '%s' "$v"
+}
+
+# Print the missing-var block and exit 1.
+_fail_missing_vars() {
+  local profile="$1"; shift
+  local -a missing=("$@")
+  err "Profile '$profile' requires the following vars in .env that are missing or empty:"
+  printf '\n'
+  local entry key desc type example
+  for entry in "${missing[@]}"; do
+    IFS='|' read -r key desc type example <<<"$entry"
+    printf '    %s\n' "$key  ($type)"
+    printf '      what:  %s\n' "$desc"
+    printf '      e.g.:  %s=%s\n\n' "$key" "$example"
   done
+  printf '    Edit .env and set the values, then re-run:\n'
+  printf '      ./smartolt.sh deploy\n\n'
+  exit 1
+}
+
+_validate_profile_env() {
+  local profile="${REPLY_PROFILE:-}"
+  [[ -n "$profile" ]] || profile="lan"
+
+  # 1. Common checks (every profile).
+  local -a missing=()
+  local entry key desc type example val
+  for entry in "${_PROFILE_REQUIRED_VARS[@]}"; do
+    IFS='|' read -r key desc type example <<<"$entry"
+    val="$(_env_value "$key")"
+    if [[ -z "$val" ]]; then
+      missing+=("$entry")
+      continue
+    fi
+    # Special case: the literal 'change-me-now' sentinel for the
+    # password is NOT a valid runtime value; the wizard never writes
+    # it (install regenerates or prompts). On deploy we want a real pw.
+    if [[ "$key" == "INITIAL_ADMIN_PASSWORD" && "$val" == "change-me-now" ]]; then
+      missing+=("$entry")
+      continue
+    fi
+    # Type-specific light validation (so we catch obvious typos).
+    case "$type" in
+      password)
+        if (( ${#val} < 8 )); then
+          missing+=("$entry")
+        fi
+        ;;
+      FQDN)
+        # No spaces, at least one dot.
+        if [[ "$val" =~ [[:space:]] ]] || [[ "$val" != *.* ]]; then
+          missing+=("$entry")
+        fi
+        ;;
+      email)
+        if [[ "$val" != *@*.* ]]; then
+          missing+=("$entry")
+        fi
+        ;;
+      image)
+        if [[ "$val" != *:* ]]; then
+          missing+=("$entry")
+        fi
+        ;;
+    esac
+  done
+
+  # 2. Profile-specific checks.
+  case "$profile" in
+    https-public)
+      for entry in \
+        "SMARTOLT_PUBLIC_DOMAIN|Public hostname the panel is served from. The DNS A record MUST point at this host before ACME HTTP-01 works.|FQDN|panel.example.com" \
+        "SMARTOLT_LETSENCRYPT_EMAIL|Email registered with Let's Encrypt for cert expiry notifications.|email|ops@example.com" ; do
+        IFS='|' read -r key desc type example <<<"$entry"
+        val="$(_env_value "$key")"
+        if [[ -z "$val" ]]; then
+          missing+=("$entry"); continue
+        fi
+        case "$type" in
+          FQDN)
+            if [[ "$val" =~ [[:space:]] ]] || [[ "$val" != *.* ]]; then
+              missing+=("$entry"); continue
+            fi
+            ;;
+          email)
+            if [[ "$val" != *@*.* ]]; then
+              missing+=("$entry"); continue
+            fi
+            ;;
+        esac
+      done
+      ;;
+    lan|https-public)
+      # These profiles include Traefik in the stack, so PROXY_IMAGE
+      # must be set. (frontend-only and https-behind-external-proxy
+      # don't start the Traefik container so the image isn't required.)
+      entry="PROXY_IMAGE|Traefik reverse proxy + ACME image (Docker Hub: asoton/smartolt-automate-traefik:<tag>)|image|asoton/smartolt-automate-traefik:v0.4.9"
+      IFS='|' read -r key desc type example <<<"$entry"
+      val="$(_env_value "$key")"
+      if [[ -z "$val" ]] || [[ "$val" != *:* ]]; then
+        missing+=("$entry")
+      fi
+      ;;
+  esac
+
+  if (( ${#missing[@]} > 0 )); then
+    _fail_missing_vars "$profile" "${missing[@]}"
+  fi
   return 0
 }
 
@@ -667,6 +812,7 @@ cmd_install() {
 
   step "Bringing up the stack"
   _init_profile
+  _validate_profile_env
   local COMPOSE_PROFILES_ARGS=()
   if _profile_needs_traefik; then
     COMPOSE_PROFILES_ARGS=(--profile traefik)
@@ -707,6 +853,8 @@ cmd_deploy() {
     die "No docker-compose.yml here. Run './smartolt.sh install' first."
   fi
   _require_env || die "Run './smartolt.sh install' first to generate .env."
+  _init_profile
+  _validate_profile_env
   local COMPOSE_PROFILES_ARGS=()
   if _profile_needs_traefik; then
     COMPOSE_PROFILES_ARGS=(--profile traefik)
