@@ -10,10 +10,10 @@ This repository is **public** and contains no application source code. The full 
 - **Non-interactive by default** — `./smartolt.sh install --yes` runs end-to-end with zero env vars (deployable defaults are committed in `.env.example`). Set env vars to override.
 - **Interactive wizard** — `install` without `--yes` walks you through every prompt.
 - **Prebuilt images** — pulls `asoton/smartolt-automate`, `asoton/smartolt-automate-frontend`, and `asoton/smartolt-automate-traefik` from Docker Hub. No `git clone`, no build step.
-- **Traefik reverse proxy** — single image replaces both Caddy + certbot. Discovers services via Docker labels. Self-signed cert at boot, auto-issues Let's Encrypt when `SMARTOLT_PUBLIC_DOMAIN` is set.
+- **Four deploy profiles** — pick how the stack is exposed: direct LAN, public HTTPS via Traefik + Let's Encrypt, HTTPS via an external reverse proxy (Cloudflare Tunnel / Caddy / nginx), or frontend-only with no proxy at all. See [Deploy profiles](#deploy-profiles) below.
+- **Traefik reverse proxy** (when included in the profile) — single image replaces both Caddy + certbot. Discovers services via Docker labels. Self-signed cert at boot, auto-issues Let's Encrypt when `SMARTOLT_PUBLIC_DOMAIN` is set.
 - **HTTPS included** — 47 DNS providers supported out of the box (Cloudflare, Route53, DigitalOcean, Gandi, Hetzner, Google Cloud DNS, plus manual mode). Cert issuance and renewal are managed from the panel, no shell access needed. Traefik auto-renews via ACME HTTP-01 ~30 days before expiry.
 - **Hot reload** — change the SmartOLT tenant URL, API token, scheduler window, or SSL settings from the panel; no `docker compose restart` required.
-- **Two deployment modes** — `EXPOSE_FRONTEND_DIRECTLY` toggles between LAN mode (frontend on `:8080` for everyone) and production mode (frontend only reachable via Traefik on `:443`).
 - **Token safety** — the SmartOLT API token is never echoed in full. The panel shows a `abc…2345`-style preview.
 - **Precise teardown** — `./smartolt.sh destroy` removes only artifacts the installer created. Templates (`*.example.*`) and other Docker projects are untouched.
 - **Re-runnable** — re-running install preserves your database, logs, and existing `.env` unless you opt in to overwriting.
@@ -46,6 +46,7 @@ sed -i 's|^INITIAL_ADMIN_PASSWORD=.*|INITIAL_ADMIN_PASSWORD=MyStrongPass!|' .env
 ### Production deployment (with public domain)
 
 ```bash
+SMARTOLT_DEPLOY_PROFILE=https-public \
 SMARTOLT_PUBLIC_DOMAIN=panel.example.com \
 SMARTOLT_LETSENCRYPT_EMAIL=ops@example.com \
 SMARTOLT_ADMIN_USERNAME=ops \
@@ -55,9 +56,36 @@ SMARTOLT_ADMIN_PASSWORD='MyStrongPass!' \
 
 This:
 
-1. Sets `EXPOSE_FRONTEND_DIRECTLY=false` (auto-detected from `SMARTOLT_PUBLIC_DOMAIN`) so the frontend is only reachable via Traefik on `:443` (loopback bind, no direct host port).
-2. Sets `TRAEFIK_ENABLE=true` so Traefik routes via Docker labels.
-3. Traefik auto-issues a Let's Encrypt cert via ACME HTTP-01 once DNS resolves to the host (you'll see a self-signed cert warning during the first ~30s, then it switches automatically).
+1. Runs the `https-public` profile: frontend bound to loopback only, Traefik routes via Docker labels, Let's Encrypt cert auto-issued.
+2. Traefik issues a real LE cert via ACME HTTP-01 once DNS resolves to the host (you'll see a self-signed cert warning during the first ~30s, then it switches automatically).
+
+## Deploy profiles
+
+A profile is a named bundle of three things: **how the frontend is exposed**, **whether Traefik runs**, and **where HTTPS comes from**. Pick the profile that matches your environment; the install wizard asks for it (or you can pin `SMARTOLT_DEPLOY_PROFILE=` in `.env` to skip the prompt). The wizard auto-detects when possible: `SMARTOLT_PUBLIC_DOMAIN` set → `https-public`, otherwise `lan`.
+
+| Profile | Frontend on host | Traefik | HTTPS | Use when |
+|---|---|---|---|---|
+| `lan` | `:8080` on `0.0.0.0` | runs, doesn't route (self-signed on `:443`) | none (LE off) | LAN testing, no DNS, no public exposure |
+| `https-public` | loopback `:8080` only | runs, routes by labels | Let's Encrypt via ACME HTTP-01 | Production with a public domain |
+| `https-behind-external-proxy` | loopback `:8080` only | **doesn't run** | handled by your external proxy | Cloudflare Tunnel / Caddy / nginx in front of the host; the stack never sees the public network |
+| `frontend-only` | `:8080` on `0.0.0.0` | **doesn't run** | none | Lowest resource footprint; LAN only, no HTTPS, no proxy container |
+
+`SMARTOLT_DEPLOY_PROFILE` is the single knob. The wizard writes `EXPOSE_FRONTEND_DIRECTLY`, `FRONTEND_BIND_IP`, and `TRAEFIK_ENABLE` to `.env` so subsequent `./smartolt.sh deploy` calls keep the same routing without re-running the wizard.
+
+For `https-behind-external-proxy`, point your external proxy at `http://127.0.0.1:8080` (the frontend loopback bind). Example with a local Caddy:
+
+```caddyfile
+# /etc/caddy/Caddyfile
+panel.example.com {
+    reverse_proxy 127.0.0.1:8080
+}
+```
+
+For `frontend-only`, open `http://HOST:8080/` directly. There is no HTTPS and no external entry point.
+
+The Traefik container is excluded from the compose stack in `https-behind-external-proxy` and `frontend-only` profiles (via Compose's `profiles:` feature), so it doesn't pull, doesn't start, and doesn't bind ports. The `lan` profile keeps Traefik running (so `:443` serves an instant self-signed HTTPS), but disables routing by labels — useful when you want to flip between `:8080` and `:443` without redeploying.
+
+If you change profile after install, edit `SMARTOLT_DEPLOY_PROFILE` in `.env` and run `./smartolt.sh deploy`.
 
 The wizard will ask you for:
 
@@ -143,7 +171,8 @@ All configuration lives in `.env` (created by the wizard from `.env.example`). E
 | `SMARTOLT_FRONTEND_IMAGE` | `asoton/smartolt-automate-frontend:v0.4.9` | Frontend image |
 | `PROXY_IMAGE` | `asoton/smartolt-automate-traefik:v0.4.9` | Traefik reverse proxy + ACME |
 | `PULL_POLICY` | `always` | `always` pulls on every `up`; `missing`/`if_not_present` honours local cache |
-| `SMARTOLT_PUBLIC_DOMAIN` | _(empty)_ | When set, Traefik issues a real Let's Encrypt cert via HTTP-01. The hostname's DNS A record MUST point at this host. When empty, Traefik serves a self-signed cert (instant HTTPS, browser warning). |
+| `SMARTOLT_DEPLOY_PROFILE` | _(empty — inferred)_ | One of `lan`, `https-public`, `https-behind-external-proxy`, `frontend-only`. See [Deploy profiles](#deploy-profiles). If empty, the wizard infers from `SMARTOLT_PUBLIC_DOMAIN`: set → `https-public`, empty → `lan`. |
+| `SMARTOLT_PUBLIC_DOMAIN` | _(empty)_ | When set, Traefik issues a real Let's Encrypt cert via HTTP-01. The hostname's DNS A record MUST point at this host. When empty, Traefik serves a self-signed cert (instant HTTPS, browser warning). Required for the `https-public` profile; ignored for the others. |
 | `SMARTOLT_LETSENCRYPT_EMAIL` | `admin@example.com` | Email for ACME registration |
 | `EXPOSE_FRONTEND_DIRECTLY` | `true` | When `true`, the frontend publishes on `0.0.0.0:8080` (LAN/test mode). When `false`, only reachable via Traefik on `:443` (production with a public domain). Auto-detected from `SMARTOLT_PUBLIC_DOMAIN` by `install`. |
 | `TRAEFIK_DASHBOARD` | `false` | Set to `true` to enable Traefik's web dashboard on `:8081`. |

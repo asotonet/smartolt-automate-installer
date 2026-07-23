@@ -114,37 +114,135 @@ if [[ -f .env ]]; then
   set +a
 fi
 
+# Resolve the deploy profile (lan / https-public /
+# https-behind-external-proxy / frontend-only) and apply its derived
+# vars. Done unconditionally — even on `install` before .env exists, so
+# that EXPOSE_FRONTEND_DIRECTLY / FRONTEND_BIND_IP / TRAEFIK_ENABLE are
+# always defined before the wizard writes them.
+# (The _init_profile call itself lives just below, after the function
+# definitions it depends on.)
+
 # ─── shared helpers ──────────────────────────────────────────────────────────
 DEFAULT_IMAGE_TAG="${SMARTOLT_IMAGE_TAG:-v0.4.9}"
 DOCKERHUB_NAMESPACE="${DOCKERHUB_NAMESPACE:-asoton}"
 COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-smartolt_api_automate}"
 export COMPOSE_PROJECT_NAME
 
-# Decide whether the frontend container publishes on all interfaces
-# (0.0.0.0) or only on the loopback (127.0.0.1).
+# ─── deploy profiles ─────────────────────────────────────────────────────────
+# A profile is a named bundle of (frontend exposure, Traefik presence,
+# HTTPS source) settings. The operator picks one (or the wizard infers
+# one) and the script sets the derived vars accordingly.
 #
-# Behavior:
-#   - If the operator explicitly set EXPOSE_FRONTEND_DIRECTLY in the shell
-#     (passed via env var when invoking this script), respect it as-is.
-#   - Otherwise, auto-detect based on SMARTOLT_PUBLIC_DOMAIN:
-#       empty PUBLIC_DOMAIN → expose directly (true, 0.0.0.0)
-#       set PUBLIC_DOMAIN   → loopback only (false, 127.0.0.1)
-#   - If the variable is unset entirely, default to direct (true, 0.0.0.0).
+# Available profiles:
+#   lan                              — frontend on :8080 LAN, Traefik runs
+#                                       but does NOT route (operator uses
+#                                       :8080 directly). Self-signed :443.
+#   https-public                     — frontend loopback only, Traefik
+#                                       routes via HTTPS with a Let's
+#                                       Encrypt cert. The "production
+#                                       with a public domain" default.
+#   https-behind-external-proxy      — frontend loopback, NO Traefik
+#                                       container. Operator runs Caddy /
+#                                       Cloudflare Tunnel / nginx outside
+#                                       the stack and points it at
+#                                       http://127.0.0.1:8080.
+#   frontend-only                    — frontend on :8080 LAN, NO Traefik.
+#                                       HTTP only, no HTTPS. Lowest
+#                                       resource footprint.
 #
-# Strip trailing \r that Windows-edited .env files may carry.
-EXPOSE_FRONTEND_DIRECTLY="${EXPOSE_FRONTEND_DIRECTLY%$'\r'}"
-if [[ -z "${EXPOSE_FRONTEND_DIRECTLY:-}" ]]; then
-  # Variable is unset → default to direct.
-  EXPOSE_FRONTEND_DIRECTLY="true"
-fi
-# At this point EXPOSE_FRONTEND_DIRECTLY is either "true", "false", or
-# "yes"/"no" — anything else is treated as false (loopback).
-if [[ "${EXPOSE_FRONTEND_DIRECTLY}" =~ ^[Yy](es)?$ ]]; then
-  FRONTEND_BIND_IP="${FRONTEND_BIND_IP:-0.0.0.0}"
-else
-  FRONTEND_BIND_IP="${FRONTEND_BIND_IP:-127.0.0.1}"
-fi
-export FRONTEND_BIND_IP EXPOSE_FRONTEND_DIRECTLY
+# Resolution order (highest priority first):
+#   1. SMARTOLT_DEPLOY_PROFILE env var (explicit override)
+#   2. .env file's SMARTOLT_DEPLOY_PROFILE (persistent choice)
+#   3. Inferred from SMARTOLT_PUBLIC_DOMAIN:
+#        set   → https-public
+#        empty → lan
+#   4. Default: lan
+_profile_normalize() {
+  case "${1,,}" in
+    lan) echo "lan" ;;
+    https-public|https_public|public|https) echo "https-public" ;;
+    https-behind-external-proxy|behind-external-proxy|external-proxy|behind) echo "https-behind-external-proxy" ;;
+    frontend-only|frontend_only|direct) echo "frontend-only" ;;
+    *) return 1 ;;
+  esac
+}
+
+# Returns the active profile name (echoes it; non-zero on unknown).
+_resolve_profile() {
+  local raw="${SMARTOLT_DEPLOY_PROFILE:-}"
+  if [[ -n "$raw" ]]; then
+    _profile_normalize "$raw"
+    return $?
+  fi
+  # No explicit profile — infer from PUBLIC_DOMAIN.
+  if [[ -n "${SMARTOLT_PUBLIC_DOMAIN:-}" ]]; then
+    echo "https-public"
+    return 0
+  fi
+  echo "lan"
+  return 0
+}
+
+# Apply a profile's settings to the runtime env. Echoes the human-
+# readable summary. Unknown profile is a fatal error.
+_apply_profile() {
+  local profile="$1"
+  case "$profile" in
+    lan)
+      EXPOSE_FRONTEND_DIRECTLY="true"
+      FRONTEND_BIND_IP="0.0.0.0"
+      TRAEFIK_ENABLE="false"   # Traefik runs but doesn't route
+      ;;
+    https-public)
+      EXPOSE_FRONTEND_DIRECTLY="false"
+      FRONTEND_BIND_IP="127.0.0.1"
+      TRAEFIK_ENABLE="true"
+      ;;
+    https-behind-external-proxy)
+      EXPOSE_FRONTEND_DIRECTLY="false"
+      FRONTEND_BIND_IP="127.0.0.1"
+      TRAEFIK_ENABLE="false"   # ignored — Traefik service not started
+      ;;
+    frontend-only)
+      EXPOSE_FRONTEND_DIRECTLY="true"
+      FRONTEND_BIND_IP="0.0.0.0"
+      TRAEFIK_ENABLE="false"
+      ;;
+    *)
+      die "Unknown deploy profile: $profile"
+      ;;
+  esac
+  export EXPOSE_FRONTEND_DIRECTLY FRONTEND_BIND_IP TRAEFIK_ENABLE
+  printf '%s' "$profile"
+}
+
+# Resolve the active profile (considering .env + env vars + inference)
+# and apply it. Sets EXPOSE_FRONTEND_DIRECTLY, FRONTEND_BIND_IP,
+# TRAEFIK_ENABLE, and echoes the profile name.
+_init_profile() {
+  # Strip \r that Windows-edited .env files may carry.
+  local raw="${SMARTOLT_DEPLOY_PROFILE%$'\r'}"
+  SMARTOLT_DEPLOY_PROFILE="$raw"
+  local resolved
+  if ! resolved="$(_resolve_profile 2>/dev/null)"; then
+    die "Invalid SMARTOLT_DEPLOY_PROFILE='$SMARTOLT_DEPLOY_PROFILE'. Valid: lan, https-public, https-behind-external-proxy, frontend-only"
+  fi
+  _apply_profile "$resolved" >/dev/null
+  REPLY_PROFILE="$resolved"
+  export REPLY_PROFILE
+}
+
+# Whether the active profile needs the Traefik service to start.
+# Returns 0 if yes, 1 if no (caller can use this in shell conditionals).
+_profile_needs_traefik() {
+  case "${REPLY_PROFILE:-lan}" in
+    lan|https-public) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Resolve + apply the active profile now that all helpers exist.
+_init_profile
 
 CONTAINER_NAMES=(smartolt-automate smartolt-automate-web smartolt-automate-frontend smartolt-automate-traefik)
 
@@ -161,11 +259,11 @@ _write_env_file() {
 import sys, os, pathlib
 
 path = pathlib.Path(".env")
-keys = ["SMARTOLT_BASE_URL", "SMARTOLT_API_KEY", "SCHEDULER_TIMEZONE",
-        "SCHEDULER_HOUR_START", "SCHEDULER_HOUR_END", "TZ",
+keys = ["SMARTOLT_DEPLOY_PROFILE", "SMARTOLT_BASE_URL", "SMARTOLT_API_KEY",
+        "SCHEDULER_TIMEZONE", "SCHEDULER_HOUR_START", "SCHEDULER_HOUR_END",
         "INITIAL_ADMIN_USERNAME", "INITIAL_ADMIN_PASSWORD",
-        "SMARTOLT_IMAGE", "SMARTOLT_FRONTEND_IMAGE",
-        "PROXY_IMAGE", "CERTBOT_IMAGE"]
+        "SMARTOLT_IMAGE", "SMARTOLT_FRONTEND_IMAGE", "PROXY_IMAGE",
+        "SMARTOLT_PUBLIC_DOMAIN", "SMARTOLT_LETSENCRYPT_EMAIL"]
 vals = sys.argv[1:1 + len(keys)]
 if len(vals) != len(keys):
     sys.exit(f"Internal error: expected {len(keys)} env values, got {len(vals)}")
@@ -337,6 +435,43 @@ cmd_install() {
   [[ -z "$KEEP_DB" && -f data/users.db ]] && { warn "data/users.db exists"; confirm || die "Aborted."; KEEP_DB="n"; }
   [[ -z "$KEEP_DB" ]] && KEEP_DB="y"
 
+  step "2.5/7  Deploy profile"
+  # Re-resolve now that .env has been bootstrapped. If the operator set
+  # SMARTOLT_PUBLIC_DOMAIN via the env after the early _init_profile call
+  # we still want to honor it for the inference rule.
+  PROFILE_RAW="${SMARTOLT_DEPLOY_PROFILE:-}"
+  [[ -z "$PROFILE_RAW" && -n "${SMARTOLT_PUBLIC_DOMAIN:-}" ]] && PROFILE_RAW="https-public"
+  if [[ -n "$PROFILE_RAW" ]]; then
+    if ! PROFILE="$(_profile_normalize "$PROFILE_RAW")"; then
+      die "Invalid SMARTOLT_DEPLOY_PROFILE='$PROFILE_RAW'. Valid: lan, https-public, https-behind-external-proxy, frontend-only"
+    fi
+  elif [[ $NONINTERACTIVE -eq 1 ]]; then
+    PROFILE="lan"
+    ok "Profile: lan (auto-selected; pass SMARTOLT_DEPLOY_PROFILE=... to override)."
+  else
+    printf "    Pick a deploy profile:\n"
+    printf "      [1] lan                              — frontend on :8080 LAN, Traefik runs but doesn't route (self-signed :443)\n"
+    printf "      [2] https-public                     — frontend loopback, Traefik issues Let's Encrypt cert for SMARTOLT_PUBLIC_DOMAIN\n"
+    printf "      [3] https-behind-external-proxy      — frontend loopback, NO Traefik; you run Caddy/Cloudflare Tunnel/nginx outside the stack\n"
+    printf "      [4] frontend-only                    — frontend on :8080 LAN, NO Traefik, no HTTPS\n"
+    printf "    Profile [1]: "
+    read -r ans
+    case "${ans:-1}" in
+      2|https-public) PROFILE="https-public" ;;
+      3|https-behind-external-proxy|external) PROFILE="https-behind-external-proxy" ;;
+      4|frontend-only|direct) PROFILE="frontend-only" ;;
+      1|lan|"") PROFILE="lan" ;;
+      *) die "Invalid selection: $ans" ;;
+    esac
+  fi
+  SMARTOLT_DEPLOY_PROFILE="$PROFILE"
+  export SMARTOLT_DEPLOY_PROFILE
+  ok "Profile: $PROFILE"
+  # Apply profile to derive EXPOSE_FRONTEND_DIRECTLY / FRONTEND_BIND_IP /
+  # TRAEFIK_ENABLE. The wizard may further nudge these for the wizard
+  # step 6 (HTTPS) below.
+  _apply_profile "$PROFILE" >/dev/null
+
   step "3/7  Admin credentials"
   ADMIN_USER="${SMARTOLT_ADMIN_USERNAME:-}"
   [[ -z "$ADMIN_USER" ]] && { if [[ $NONINTERACTIVE -eq 1 ]]; then ADMIN_USER="admin"; else
@@ -415,26 +550,49 @@ cmd_install() {
 
   step "6/7  Public access (HTTPS)"
   ENABLE_SSL="n"
-  if [[ -n "${SMARTOLT_PUBLIC_DOMAIN:-}" ]]; then
-    ENABLE_SSL="y"
-  elif [[ $NONINTERACTIVE -eq 1 ]]; then
-    ok "Public access: deferred."
-  else
-    read -r -p "    Enable HTTPS? [y/N]: " ans; ans="${ans:-N}"
-    [[ "$ans" =~ ^[Yy]$ ]] && ENABLE_SSL="y"
-  fi
   PUBLIC_DOMAIN=""; ADMIN_EMAIL=""
-  if [[ "$ENABLE_SSL" == "y" ]]; then
-    PUBLIC_DOMAIN="${SMARTOLT_PUBLIC_DOMAIN:-}"
-    [[ -z "$PUBLIC_DOMAIN" ]] && { if [[ $NONINTERACTIVE -eq 1 ]]; then
-      die "SMARTOLT_PUBLIC_DOMAIN is required when SSL is enabled."
-    else read -r -p "    Public domain (e.g. panel.example.com): " PUBLIC_DOMAIN; fi }
-    PUBLIC_DOMAIN="${PUBLIC_DOMAIN#\*.}"
-    ADMIN_EMAIL="${SMARTOLT_LETSENCRYPT_EMAIL:-admin@${PUBLIC_DOMAIN#*.}}"
-    ok "HTTPS will be enabled for $PUBLIC_DOMAIN."
-  else
-    ok "HTTP only."
-  fi
+  case "$PROFILE" in
+    https-public)
+      # Profile forces HTTPS via Let's Encrypt. Domain is mandatory.
+      ENABLE_SSL="y"
+      PUBLIC_DOMAIN="${SMARTOLT_PUBLIC_DOMAIN:-}"
+      [[ -z "$PUBLIC_DOMAIN" && $NONINTERACTIVE -eq 1 ]] && die "SMARTOLT_PUBLIC_DOMAIN is required for the https-public profile."
+      if [[ -z "$PUBLIC_DOMAIN" && $NONINTERACTIVE -ne 1 ]]; then
+        read -r -p "    Public domain (e.g. panel.example.com): " PUBLIC_DOMAIN
+      fi
+      [[ -z "$PUBLIC_DOMAIN" ]] && die "SMARTOLT_PUBLIC_DOMAIN is required for the https-public profile."
+      PUBLIC_DOMAIN="${PUBLIC_DOMAIN#\*.}"
+      ADMIN_EMAIL="${SMARTOLT_LETSENCRYPT_EMAIL:-admin@${PUBLIC_DOMAIN#*.}}"
+      ok "HTTPS will be enabled for $PUBLIC_DOMAIN."
+      ;;
+    https-behind-external-proxy|frontend-only)
+      # HTTPS, if any, is handled by something outside the stack.
+      ENABLE_SSL="n"
+      ok "HTTPS: handled externally (no Traefik in this profile)."
+      ;;
+    lan|*)
+      # Original behavior: optional HTTPS via Traefik ACME.
+      if [[ -n "${SMARTOLT_PUBLIC_DOMAIN:-}" ]]; then
+        ENABLE_SSL="y"
+      elif [[ $NONINTERACTIVE -eq 1 ]]; then
+        ok "Public access: deferred."
+      else
+        read -r -p "    Enable HTTPS? [y/N]: " ans; ans="${ans:-N}"
+        [[ "$ans" =~ ^[Yy]$ ]] && ENABLE_SSL="y"
+      fi
+      if [[ "$ENABLE_SSL" == "y" ]]; then
+        PUBLIC_DOMAIN="${SMARTOLT_PUBLIC_DOMAIN:-}"
+        [[ -z "$PUBLIC_DOMAIN" ]] && { if [[ $NONINTERACTIVE -eq 1 ]]; then
+          die "SMARTOLT_PUBLIC_DOMAIN is required when SSL is enabled."
+        else read -r -p "    Public domain (e.g. panel.example.com): " PUBLIC_DOMAIN; fi }
+        PUBLIC_DOMAIN="${PUBLIC_DOMAIN#\*.}"
+        ADMIN_EMAIL="${SMARTOLT_LETSENCRYPT_EMAIL:-admin@${PUBLIC_DOMAIN#*.}}"
+        ok "HTTPS will be enabled for $PUBLIC_DOMAIN."
+      else
+        ok "HTTP only."
+      fi
+      ;;
+  esac
 
   IMAGE_TAG="${SMARTOLT_IMAGE_TAG:-$DEFAULT_IMAGE_TAG}"
 
@@ -456,41 +614,26 @@ cmd_install() {
     ok "Created .env"
   fi
 
-  _write_env_file "$OLT_BASE_URL" "$OLT_API_KEY" "$TZ_NAME" \
-    "$SCHED_HOUR_START" "$SCHED_HOUR_END" "$TZ_NAME" \
+  _write_env_file "$PROFILE" \
+    "$OLT_BASE_URL" "$OLT_API_KEY" \
+    "$TZ_NAME" "$SCHED_HOUR_START" "$SCHED_HOUR_END" \
     "$ADMIN_USER" "$ADMIN_PASSWORD" \
     "${DOCKERHUB_NAMESPACE}/smartolt-automate:${IMAGE_TAG}" \
     "${DOCKERHUB_NAMESPACE}/smartolt-automate-frontend:${IMAGE_TAG}" \
     "${DOCKERHUB_NAMESPACE}/smartolt-automate-traefik:${IMAGE_TAG}" \
+    "$PUBLIC_DOMAIN" "$ADMIN_EMAIL"
   ok "Wrote wizard values to .env"
 
-  # Set TRAEFIK_ENABLE based on whether the operator configured a public
-  # domain. Empty PUBLIC_DOMAIN = Traefik ignores the frontend/web
-  # containers (operator is using the host port mapping for local testing).
-  TRAEFIK_ENABLE="false"
-  [[ -n "$PUBLIC_DOMAIN" ]] && TRAEFIK_ENABLE="true"
-  sed -i.bak -E "s|^TRAEFIK_ENABLE=.*|TRAEFIK_ENABLE=$TRAEFIK_ENABLE|" .env
+  # TRAEFIK_ENABLE and the frontend bind are already derived from the
+  # profile selected in step 2.5. We just persist them to .env so a
+  # later `./smartolt.sh deploy` (which re-loads .env on startup) keeps
+  # the same routing behaviour without re-running the wizard.
+  sed -i.bak -E "s|^SMARTOLT_DEPLOY_PROFILE=.*|SMARTOLT_DEPLOY_PROFILE=${SMARTOLT_DEPLOY_PROFILE}|" .env
+  sed -i.bak -E "s|^TRAEFIK_ENABLE=.*|TRAEFIK_ENABLE=${TRAEFIK_ENABLE}|" .env
+  sed -i.bak -E "s|^EXPOSE_FRONTEND_DIRECTLY=.*|EXPOSE_FRONTEND_DIRECTLY=${EXPOSE_FRONTEND_DIRECTLY}|" .env
+  sed -i.bak -E "s|^FRONTEND_BIND_IP=.*|FRONTEND_BIND_IP=${FRONTEND_BIND_IP}|" .env
   rm -f .env.bak
-  ok "TRAEFIK_ENABLE=$TRAEFIK_ENABLE (set by install based on SMARTOLT_PUBLIC_DOMAIN)"
-
-  # Bind the frontend host port to all interfaces or loopback only,
-  # depending on whether the operator wants it reachable directly or
-  # only via Traefik. We always write the canonical value to .env based
-  # on the current SMARTOLT_PUBLIC_DOMAIN; operators who want a fixed
-  # value can edit .env *after* install (they'd have to override
-  # EXPOSE_FRONTEND_DIRECTLY=true to keep the loopback bind on a
-  # re-install with PUBLIC_DOMAIN set).
-  if [[ -z "${PUBLIC_DOMAIN}" ]]; then
-    TARGET_EFD="true"
-    TARGET_BIND="0.0.0.0"
-  else
-    TARGET_EFD="false"
-    TARGET_BIND="127.0.0.1"
-  fi
-  sed -i.bak -E "s|^EXPOSE_FRONTEND_DIRECTLY=.*|EXPOSE_FRONTEND_DIRECTLY=${TARGET_EFD}|" .env
-  sed -i.bak -E "s|^FRONTEND_BIND_IP=.*|FRONTEND_BIND_IP=${TARGET_BIND}|" .env
-  rm -f .env.bak
-  ok "Frontend host bind: $TARGET_BIND (EXPOSE_FRONTEND_DIRECTLY=$TARGET_EFD)"
+  ok "Frontend host bind: $FRONTEND_BIND_IP (EXPOSE_FRONTEND_DIRECTLY=$EXPOSE_FRONTEND_DIRECTLY, TRAEFIK_ENABLE=$TRAEFIK_ENABLE)"
 
   mkdir -p configs
   [[ ! -f configs/olts.yaml && -f configs/olts.example.yaml ]] && {
@@ -504,8 +647,16 @@ cmd_install() {
   fi
 
   step "Bringing up the stack"
-  docker compose --project-name "$COMPOSE_PROJECT_NAME" pull 2>&1 | tail -5
-  docker compose --project-name "$COMPOSE_PROJECT_NAME" up -d 2>&1 | tail -8
+  _init_profile
+  local COMPOSE_PROFILES_ARGS=()
+  if _profile_needs_traefik; then
+    COMPOSE_PROFILES_ARGS=(--profile traefik)
+    ok "Profile '$PROFILE' includes the Traefik service."
+  else
+    ok "Profile '$PROFILE' skips Traefik — the container will not start."
+  fi
+  docker compose --project-name "$COMPOSE_PROJECT_NAME" "${COMPOSE_PROFILES_ARGS[@]}" pull 2>&1 | tail -5
+  docker compose --project-name "$COMPOSE_PROJECT_NAME" "${COMPOSE_PROFILES_ARGS[@]}" up -d 2>&1 | tail -8
 
   step "Verifying healthchecks"
   # Probe the frontend (the only host-published service) to confirm the
@@ -537,7 +688,14 @@ cmd_deploy() {
     die "No docker-compose.yml here. Run './smartolt.sh install' first."
   fi
   _require_env || die "Run './smartolt.sh install' first to generate .env."
-  docker compose --project-name "$COMPOSE_PROJECT_NAME" up -d "$@"
+  local COMPOSE_PROFILES_ARGS=()
+  if _profile_needs_traefik; then
+    COMPOSE_PROFILES_ARGS=(--profile traefik)
+    ok "Profile '$REPLY_PROFILE' includes the Traefik service."
+  else
+    ok "Profile '$REPLY_PROFILE' skips Traefik — the container will not start."
+  fi
+  docker compose --project-name "$COMPOSE_PROJECT_NAME" "${COMPOSE_PROFILES_ARGS[@]}" up -d "$@"
   ok "Stack is up"
 }
 

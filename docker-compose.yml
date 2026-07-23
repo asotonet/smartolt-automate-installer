@@ -138,6 +138,12 @@ services:
     image: ${PROXY_IMAGE:-asoton/smartolt-automate-traefik:v0.4.9}
     pull_policy: ${PULL_POLICY:-always}
     container_name: smartolt-automate-traefik
+    # The 'traefik' profile is only activated by `./smartolt.sh deploy` for
+    # profiles that need it (lan, https-public). Profiles that put another
+    # reverse proxy in front of the stack (https-behind-external-proxy) or
+    # that don't need HTTPS at all (frontend-only) skip this service by
+    # omitting `--profile traefik` from the docker compose invocation.
+    profiles: ["traefik"]
     restart: unless-stopped
     command: ["traefik", "--configFile=/etc/traefik/traefik.yml"]
     environment:

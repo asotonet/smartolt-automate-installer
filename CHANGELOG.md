@@ -5,6 +5,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Deploy profiles**: `SMARTOLT_DEPLOY_PROFILE` selects one of four
+  named bundles (frontend exposure + Traefik presence + HTTPS source):
+  - `lan` (default) — frontend on `:8080` LAN, Traefik runs but does
+    NOT route (self-signed on `:443`).
+  - `https-public` — frontend loopback, Traefik routes with a LE cert.
+  - `https-behind-external-proxy` — frontend loopback, NO Traefik
+    container; for Cloudflare Tunnel / Caddy / nginx in front of
+    the host.
+  - `frontend-only` — frontend on `:8080` LAN, NO Traefik, no HTTPS.
+  The Traefik service is now declared with Compose `profiles: ["traefik"]`
+  and only starts for profiles that need it. The install wizard asks
+  for the profile (or infers it from `SMARTOLT_PUBLIC_DOMAIN`); the
+  derived vars (`EXPOSE_FRONTEND_DIRECTLY`, `FRONTEND_BIND_IP`,
+  `TRAEFIK_ENABLE`) are written to `.env` so subsequent `./smartolt.sh
+  deploy` calls keep the same routing without re-running the wizard.
+- `_require_env()` guard in `smartolt.sh`: `deploy`, `logs`, `renew`,
+  and `upgrade` now refuse to run when `.env` is missing, empty, or
+  missing any of the keys the wizard always writes (`SMARTOLT_IMAGE`,
+  `INITIAL_ADMIN_USERNAME`, `INITIAL_ADMIN_PASSWORD`). Previously a
+  failed install left a 0-byte `.env` and a subsequent `deploy` would
+  pull images and start containers with defaults baked into the
+  compose template, failing cryptically.
+
 ### Removed
 - **Deprecated script wrappers removed**: `scripts/install.sh`,
   `scripts/upgrade.sh`, `scripts/stack.sh`, `scripts/destroy.sh`. The
