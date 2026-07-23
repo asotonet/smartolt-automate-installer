@@ -270,6 +270,38 @@ _ensure_docker() {
   ok "Docker installed and running"
 }
 
+# ─── shared: guard before any deploy-side subcommand ──────────────────────────
+# Subcommands that touch docker compose (`deploy`, `logs`, `renew`,
+# `upgrade`) must refuse to run if there's no usable .env — either the
+# file is missing entirely, or it's a 0-byte stub left behind by a
+# failed install. Without this guard, `deploy` happily starts pulling
+# images and creating containers from defaults baked into
+# docker-compose.yml, then dies with a cryptic compose error.
+#
+# Returns 0 when .env exists AND has at least one expected key with a
+# non-empty value.
+_require_env() {
+  if [[ ! -f .env ]]; then
+    return 1
+  fi
+  # Treat 0-byte or whitespace-only files as missing.
+  if [[ ! -s .env ]] || [[ -z "$(tr -d '[:space:]' < .env)" ]]; then
+    return 1
+  fi
+  # At minimum, the wizard always writes SMARTOLT_IMAGE and
+  # INITIAL_ADMIN_USERNAME / INITIAL_ADMIN_PASSWORD. Any one of those
+  # being empty means the wizard didn't finish.
+  local key
+  for key in SMARTOLT_IMAGE INITIAL_ADMIN_USERNAME INITIAL_ADMIN_PASSWORD; do
+    local val
+    val="$(grep -E "^${key}=" .env | head -1 | cut -d= -f2- | sed -E 's/^"(.*)"$/\1/')"
+    if [[ -z "$val" ]]; then
+      return 1
+    fi
+  done
+  return 0
+}
+
 cmd_install() {
   step "0/7  Verifying prerequisites (auto-install Docker if missing)"
   _ensure_docker
@@ -504,7 +536,7 @@ cmd_deploy() {
   if [[ ! -f docker-compose.yml ]]; then
     die "No docker-compose.yml here. Run './smartolt.sh install' first."
   fi
-  [[ -f .env ]] || die "No .env here. Run './smartolt.sh install' first."
+  _require_env || die "Run './smartolt.sh install' first to generate .env."
   docker compose --project-name "$COMPOSE_PROJECT_NAME" up -d "$@"
   ok "Stack is up"
 }
@@ -542,6 +574,7 @@ cmd_status() {
 # ─── subcommand: logs ────────────────────────────────────────────────────────
 cmd_logs() {
   [[ -f docker-compose.yml ]] || die "No docker-compose.yml here. Install first."
+  _require_env || die "No usable .env here. Run './smartolt.sh install' first."
   local follow="-f"
   [[ $NO_FOLLOW -eq 1 ]] && follow=""
   docker compose --project-name "$COMPOSE_PROJECT_NAME" logs $follow --tail=100 "${SUB_ARGS[@]}"
@@ -555,6 +588,7 @@ cmd_renew() {
   # also have used `docker exec` on the core scheduler which POSTs to
   # the web tier internally, but invoking the endpoint directly is
   # simpler for a one-shot debug command.
+  _require_env || die "No usable .env here. Run './smartolt.sh install' first."
   step "Forcing certbot renew"
   RESP=$(MSYS_NO_PATHCONV=1 docker exec smartolt-automate-web python -c "
 import urllib.request
@@ -576,7 +610,7 @@ except Exception as e:
 
 # ─── subcommand: upgrade ─────────────────────────────────────────────────────
 cmd_upgrade() {
-  [[ -f .env ]] || die "No .env here. Run './smartolt.sh install' first."
+  _require_env || die "No usable .env here. Run './smartolt.sh install' first."
   TARGET="${ARGS[0]:-$(grep -E '^SMARTOLT_IMAGE=' .env | head -1 | cut -d= -f2- | sed 's/.*://')}"
   [[ "$TARGET" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+ ]] || die "Not a semver: $TARGET"
   [[ "$TARGET" == v* ]] || TARGET="v$TARGET"
