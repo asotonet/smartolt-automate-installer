@@ -1,0 +1,21 @@
+# All code in this repo is owned by the maintainer (`@asotonet`).
+# Any PR touching these paths needs review from `@asotonet`
+# before it can land on `main`.
+#
+# How to use this file:
+#   1. After cloning, the maintainer becomes the implicit owner
+#      of every file.
+#   2. External contributors can open a PR against `main`. With
+#      branch protection enabled (1 approving review + linear
+#      history + conversation resolution), the PR must be
+#      reviewed before merge.
+#   3. To assign a long-term co-maintainer, append
+#      `@their-handle *` to the relevant section below.
+
+*       @asotonet
+
+# Core installer script. Reviewed line-by-line because it runs
+# root-level commands and orchestrates docker / docker compose.
+/smartolt.sh      @asotonet
+/scripts/         @asotonet
+/docker-compose.yml @asotonet
