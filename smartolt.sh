@@ -778,15 +778,39 @@ cmd_install() {
     ok "Created .env"
   fi
 
+  # Resolve the proxy image. If the operator already set PROXY_IMAGE in
+  # .env (e.g. to pin a hotfix tag like :v0.4.10-traefik-fix for a
+  # known Docker Engine 29 compat issue), keep it; otherwise use the
+  # default tag. Same for SMARTOLT_IMAGE / SMARTOLT_FRONTEND_IMAGE —
+  # the operator's pin is respected on re-install.
+  _resolve_image() {
+    local key="$1" default="$2"
+    local v
+    v="$(grep -E "^${key}=" .env | head -1 | cut -d= -f2- | sed -E 's/^"(.*)"$/\1/')"
+    # An empty value, the literal placeholder, or one that still
+    # references the default IMAGE_TAG is treated as "use default".
+    if [[ -z "$v" ]] || [[ "$v" == *"v0.3.3"* ]]; then
+      printf '%s' "$default"
+    else
+      printf '%s' "$v"
+    fi
+  }
+  local PROXY_IMAGE_RESOLVED
+  PROXY_IMAGE_RESOLVED="$(_resolve_image PROXY_IMAGE "${DOCKERHUB_NAMESPACE}/smartolt-automate-traefik:${IMAGE_TAG}")"
+  local BACKEND_IMAGE_RESOLVED
+  BACKEND_IMAGE_RESOLVED="$(_resolve_image SMARTOLT_IMAGE "${DOCKERHUB_NAMESPACE}/smartolt-automate:${IMAGE_TAG}")"
+  local FRONTEND_IMAGE_RESOLVED
+  FRONTEND_IMAGE_RESOLVED="$(_resolve_image SMARTOLT_FRONTEND_IMAGE "${DOCKERHUB_NAMESPACE}/smartolt-automate-frontend:${IMAGE_TAG}")"
+
   _write_env_file "$PROFILE" \
     "$OLT_BASE_URL" "$OLT_API_KEY" \
     "$TZ_NAME" "$SCHED_HOUR_START" "$SCHED_HOUR_END" \
     "$ADMIN_USER" "$ADMIN_PASSWORD" \
-    "${DOCKERHUB_NAMESPACE}/smartolt-automate:${IMAGE_TAG}" \
-    "${DOCKERHUB_NAMESPACE}/smartolt-automate-frontend:${IMAGE_TAG}" \
-    "${DOCKERHUB_NAMESPACE}/smartolt-automate-traefik:${IMAGE_TAG}" \
+    "$BACKEND_IMAGE_RESOLVED" \
+    "$FRONTEND_IMAGE_RESOLVED" \
+    "$PROXY_IMAGE_RESOLVED" \
     "$PUBLIC_DOMAIN" "$ADMIN_EMAIL"
-  ok "Wrote wizard values to .env"
+  ok "Wrote wizard values to .env (image pins preserved if previously set)"
 
   # TRAEFIK_ENABLE and the frontend bind are already derived from the
   # profile selected in step 2.5. We just persist them to .env so a
@@ -861,6 +885,17 @@ cmd_deploy() {
     ok "Profile '$REPLY_PROFILE' includes the Traefik service."
   else
     ok "Profile '$REPLY_PROFILE' skips Traefik — the container will not start."
+  fi
+  # Compose with `profiles:` does NOT remove containers that were
+  # started under a different profile — they become orphans. If a
+  # Traefik container exists from a previous profile and the new
+  # profile doesn't need it, the orphan will keep holding ports 80/443
+  # and silently contradict the operator's intent. Detect and down
+  # before up to keep the deploy idempotent across profile changes.
+  if [[ -n "$(docker ps -a --format '{{.Names}}' 2>/dev/null | grep -x smartolt-automate-traefik)" ]] \
+     && ! _profile_needs_traefik; then
+    warn "Traefik container exists from a previous profile; removing it before up."
+    docker compose --project-name "$COMPOSE_PROJECT_NAME" --profile traefik down --remove-orphans 2>&1 | tail -3
   fi
   docker compose --project-name "$COMPOSE_PROJECT_NAME" "${COMPOSE_PROFILES_ARGS[@]}" up -d "$@"
   ok "Stack is up"
