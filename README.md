@@ -4,6 +4,10 @@ One-command installer for [SmartOLT Automate](https://github.com/asotonet/smarto
 
 This repo is public and contains no application source — the images come from Docker Hub. Full source lives in the [upstream project](https://github.com/asotonet/smartolt-automate).
 
+<p align="center">
+  <img src="docs/dashboard.png" alt="SmartOLT Automate dashboard" width="900">
+</p>
+
 ## Quick start
 
 ```bash
