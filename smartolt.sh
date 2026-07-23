@@ -37,7 +37,7 @@
 #   SMARTOLT_INSTALL_NONINTERACTIVE   same as --non-interactive
 #   SMARTOLT_INSTALL_SKIP_DEPLOY      write files only, don't deploy
 #   SMARTOLT_INSTALL_DRY_RUN          same as --dry-run
-#   SMARTOLT_IMAGE_TAG              default: v0.3.3
+#   SMARTOLT_IMAGE_TAG              default: v0.4.9
 #   DOCKERHUB_NAMESPACE             default: asoton
 
 set -eo pipefail
@@ -115,7 +115,7 @@ if [[ -f .env ]]; then
 fi
 
 # ─── shared helpers ──────────────────────────────────────────────────────────
-DEFAULT_IMAGE_TAG="${SMARTOLT_IMAGE_TAG:-v0.6.0}"
+DEFAULT_IMAGE_TAG="${SMARTOLT_IMAGE_TAG:-v0.4.9}"
 DOCKERHUB_NAMESPACE="${DOCKERHUB_NAMESPACE:-asoton}"
 COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-smartolt_api_automate}"
 export COMPOSE_PROJECT_NAME

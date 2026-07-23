@@ -9,7 +9,7 @@
 
 services:
   smartolt-automate:
-    image: ${SMARTOLT_IMAGE:-asoton/smartolt-automate:v0.3.3}
+    image: ${SMARTOLT_IMAGE:-asoton/smartolt-automate:v0.4.9}
     pull_policy: ${PULL_POLICY:-always}
     container_name: smartolt-automate
     restart: unless-stopped
@@ -19,30 +19,12 @@ services:
       SMARTOLT_BASE_URL: "${SMARTOLT_BASE_URL:-}"
       SMARTOLT_API_KEY: "${SMARTOLT_API_KEY:-}"
       OLTS_CONFIG_JSON: "${OLTS_CONFIG_JSON:-}"
-      TZ: "${TZ:-America/Bogota}"
-      SCHEDULER_TIMEZONE: "${SCHEDULER_TIMEZONE:-America/Bogota}"
+      SCHEDULER_TIMEZONE: "${SCHEDULER_TIMEZONE:-America/Costa_Rica}"
       SCHEDULER_HOUR_START: "${SCHEDULER_HOUR_START:-2}"
       SCHEDULER_HOUR_END: "${SCHEDULER_HOUR_END:-3}"
-      BATCH_INITIAL_CONCURRENCY: "${BATCH_INITIAL_CONCURRENCY:-1}"
-      BATCH_MAX_CONCURRENCY: "${BATCH_MAX_CONCURRENCY:-3}"
-      BATCH_COOLDOWN_MS: "${BATCH_COOLDOWN_MS:-500}"
-      BATCH_ERROR_THRESHOLD: "${BATCH_ERROR_THRESHOLD:-0.02}"
-      OLT_STARTUP_STAGGER_SECONDS: "${OLT_STARTUP_STAGGER_SECONDS:-15}"
-      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
-      LOG_JSON: "${LOG_JSON:-false}"
-      LOG_DIR: "${LOG_DIR:-/app/logs}"
-      LOG_FILE_PREFIX: "${LOG_FILE_PREFIX:-smartolt-automate}"
-      STATE_DIR: "${STATE_DIR:-/app/state}"
-      OLTS_CONFIG_PATH: "${OLTS_CONFIG_PATH:-/app/configs/olts.yaml}"
-      # Shared with the web container so the core scheduler can call
-      # the web's /api/internal/public-access/_internal/renew-now endpoint.
-      INTERNAL_API_TOKEN: "${INTERNAL_API_TOKEN:-}"
-      INTERNAL_API_TOKEN_FILE: "${INTERNAL_API_TOKEN_FILE:-/app/data/internal_token}"
-      WEB_SERVICE_NAME: "${WEB_SERVICE_NAME:-smartolt-automate-web}"
-      WEB_INTERNAL_PORT: "${WEB_INTERNAL_PORT:-8000}"
-      SSL_RENEW_HOUR: "${SSL_RENEW_HOUR:-3,15}"
       # Traefik service name (so the core scheduler can ping Traefik if needed).
       PROXY_SERVICE_NAME: "${PROXY_SERVICE_NAME:-smartolt-automate-traefik}"
+      WEB_SERVICE_NAME: "${WEB_SERVICE_NAME:-smartolt-automate-web}"
     volumes:
       - logs:/app/logs
       - state:/app/state
@@ -64,7 +46,7 @@ services:
       start_period: 15s
 
   web:
-    image: ${SMARTOLT_IMAGE:-asoton/smartolt-automate:v0.3.3}
+    image: ${SMARTOLT_IMAGE:-asoton/smartolt-automate:v0.4.9}
     pull_policy: ${PULL_POLICY:-always}
     container_name: smartolt-automate-web
     restart: unless-stopped
@@ -76,21 +58,9 @@ services:
       SMARTOLT_API_KEY: "${SMARTOLT_API_KEY:-}"
       INITIAL_ADMIN_USERNAME: "${INITIAL_ADMIN_USERNAME:?Set INITIAL_ADMIN_USERNAME in .env}"
       INITIAL_ADMIN_PASSWORD: "${INITIAL_ADMIN_PASSWORD:?Set INITIAL_ADMIN_PASSWORD in .env}"
-      TZ: "${TZ:-America/Bogota}"
-      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
-      LOG_JSON: "${LOG_JSON:-false}"
-      LOG_DIR: "${LOG_DIR:-/app/logs}"
-      LOG_FILE_PREFIX: "${LOG_FILE_PREFIX:-smartolt-automate}"
-      STATE_DIR: "${STATE_DIR:-/app/state}"
-      OLTS_CONFIG_PATH: "${OLTS_CONFIG_PATH:-/app/configs/olts.yaml}"
-      WEB_INTERNAL_BASE_URL: "http://smartolt-automate:8080"
-      WEB_CORS_ORIGINS: "${WEB_CORS_ORIGINS:-http://localhost:5173,http://localhost}"
-      WEB_DB_PATH: "/app/data/users.db"
       PROXY_HTTPS_PORT: "${PROXY_HTTPS_PORT:-443}"
       COMPOSE_PROJECT_NAME: "${COMPOSE_PROJECT_NAME:-smartolt_api_automate}"
       PROXY_SERVICE_NAME: "${PROXY_SERVICE_NAME:-smartolt-automate-traefik}"
-      INTERNAL_API_TOKEN: "${INTERNAL_API_TOKEN:-}"
-      INTERNAL_API_TOKEN_FILE: "${INTERNAL_API_TOKEN_FILE:-/app/data/internal_token}"
     volumes:
       - logs:/app/logs:ro
       - state:/app/state:ro
@@ -125,7 +95,7 @@ services:
       - "traefik.http.services.web-api.loadbalancer.server.port=8000"
 
   frontend:
-    image: ${SMARTOLT_FRONTEND_IMAGE:-asoton/smartolt-automate-frontend:v0.3.3}
+    image: ${SMARTOLT_FRONTEND_IMAGE:-asoton/smartolt-automate-frontend:v0.4.9}
     pull_policy: ${PULL_POLICY:-always}
     container_name: smartolt-automate-frontend
     restart: unless-stopped
@@ -165,7 +135,7 @@ services:
       - "traefik.http.services.frontend.loadbalancer.server.port=80"
 
   traefik:
-    image: ${PROXY_IMAGE:-asoton/smartolt-automate-traefik:v0.6.0}
+    image: ${PROXY_IMAGE:-asoton/smartolt-automate-traefik:v0.4.9}
     pull_policy: ${PULL_POLICY:-always}
     container_name: smartolt-automate-traefik
     restart: unless-stopped
@@ -174,12 +144,6 @@ services:
       SMARTOLT_PUBLIC_DOMAIN: "${SMARTOLT_PUBLIC_DOMAIN:-}"
       ACME_EMAIL: "${SMARTOLT_LETSENCRYPT_EMAIL:-admin@example.com}"
       DASHBOARD: "${TRAEFIK_DASHBOARD:-false}"
-      # Force the Docker API protocol version. Traefik's bundled docker
-      # client defaults to API v1.24, but modern Docker Engines expose
-      # v1.40+. Pinning to a current version keeps the docker provider
-      # working without rebuilding Traefik. Traefik ignores env vars
-      # it doesn't understand, so this is safe to set unconditionally.
-      DOCKER_API_VERSION: "1.43"
     volumes:
       # Traefik needs the Docker socket to watch for new containers and
       # read their labels. Same trade-off as the previous certbot setup.

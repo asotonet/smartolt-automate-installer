@@ -5,6 +5,72 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Removed
+- **Deprecated script wrappers removed**: `scripts/install.sh`,
+  `scripts/upgrade.sh`, `scripts/stack.sh`, `scripts/destroy.sh`. The
+  single `./smartolt.sh` entry point (introduced in 0.4.0) is the only
+  supported interface. Run `./smartolt.sh install`, `upgrade`,
+  `status`, `destroy`, etc. directly.
+- `--keep-certs` flag from `./smartolt.sh destroy` (certbot volume is
+  gone; the LE cert now lives in the `traefik_acme` volume and is
+  preserved by default unless the operator passes `--keep-data` or
+  chooses full teardown).
+- `CERTBOT_IMAGE` env var and references in `scripts/release.sh`. The
+  certbot container was replaced by Traefik's native ACME in 0.4.3.
+- `--certbot-image` references in `scripts/release.sh` IMAGE_BASENAME
+  map and the `4 images` references updated to `3 images`.
+
+### Changed
+- **Default image tag bumped to `v0.4.9`** across the board (was a mix
+  of `v0.3.3` for backend/frontend and `v0.6.0` for Traefik in some
+  places). `v0.6.0` was a tag that did not exist on Docker Hub at
+  release time and would cause `docker compose pull` to fail. `v0.4.9`
+  is the latest tested stable for all three images.
+- **`.env.example` trimmed to operator-tunable vars only**: 160 → 75
+  lines. Internal knobs (batching, logging, JWT, internal API token,
+  web service name, scheduler grace seconds) removed; the install
+  wizard writes sane defaults for them. If you need to tune one of
+  these advanced knobs, mount a `docker-compose.override.yml` on top
+  of the service that owns it.
+- **Default timezone** in `.env.example`, `docker-compose.yml`, and
+  the install wizard changed from `America/Bogota` to
+  `America/Costa_Rica`.
+- **Removed `DOCKER_API_VERSION: "1.43"`** from the `traefik` service
+  in `docker-compose.yml`. The env var is silently ignored by the
+  bundled Traefik 3.1.x binary; it misled operators into thinking the
+  workaround was applied. The real fix for the
+  "client version 1.24 is too old" error is to use the Traefik
+  `:latest` image (Traefik 3.7+), which negotiates a modern API version
+  with the Docker daemon. Documented in the README troubleshooting
+  table.
+- **`docker-compose.yml` `environment` blocks trimmed** to vars that
+  are actually consumed by the containers. Several env vars were
+  forwarded even though the corresponding container images never read
+  them (e.g. `BATCH_*`, `JWT_*`, `INTERNAL_API_TOKEN`, etc.). Removed.
+- **`scripts/release.sh` rewritten** to handle the 3-image stack
+  (backend, frontend, Traefik). Previous version tried to tag/push
+  `smartolt-automate-proxy` and `smartolt-automate-certbot`, which no
+  longer exist on Docker Hub. `--check`, `--skip-pull`, and explicit
+  version flags preserved.
+- **README updated** to match: 4-image references → 3-image, certbot
+  references → Traefik, Bogota → Costa Rica, troubleshooting table now
+  documents the Traefik-3.1-vs-Docker-Engine-29 API mismatch and the
+  scheduler timezone vs. `configs/global.yaml` gotcha.
+
+### Fixed
+- `scripts/release.sh` would silently publish zero tags when any of
+  the 4 image repos returned 404 from Docker Hub (which happens after
+  the certbot/proxy split into Traefik). Now it iterates only the 3
+  current images and surfaces a clear error if any pull fails.
+- `.env.example` previously listed `SMARTOLT_LETSENCRYPT_EMAIL=
+  admin@example.com` as a hard-coded default that the wizard never
+  overwrote. Operators who copy-pasted the example ended up
+  registering certs under `@example.com`, which LE rejects silently
+  with cert issuance errors that are hard to debug. The default is now
+  `admin@<SMARTOLT_PUBLIC_DOMAIN>` (filled in by the wizard when
+  HTTPS is enabled), and the comment in `.env.example` calls it out
+  explicitly.
+
 ## [0.4.4] — 2026-07-17
 
 ### Changed

@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
-# Tag and push all four SmartOLT Automate images to Docker Hub.
+# Tag and push all three SmartOLT Automate images to Docker Hub.
 #
-# Why this script exists: the wizard references backend, frontend,
-# proxy, and certbot by tag. If any of them is missing the tag for
-# the version that's in .env / DEFAULT_IMAGE_TAG, `docker compose pull`
-# fails on the first fresh install. We've shipped releases where one
-# of the four was forgotten. This script makes that mistake impossible.
+# Why this script exists: the wizard references backend, frontend, and
+# proxy by tag. If any of them is missing the tag for the version that's
+# in .env / DEFAULT_IMAGE_TAG, `docker compose pull` fails on the first
+# fresh install. We've shipped releases where one of the three was
+# forgotten. This script makes that mistake impossible.
 #
 # Usage:
 #   scripts/release.sh                     # pull + tag + push with the version from .env
-#   scripts/release.sh v0.3.0             # pull + tag + push with explicit version
-#   scripts/release.sh v0.3.0 --skip-pull  # use whatever's already in the local cache
+#   scripts/release.sh v0.4.0             # pull + tag + push with explicit version
+#   scripts/release.sh v0.4.0 --skip-pull  # use whatever's already in the local cache
 #   scripts/release.sh --check            # verify the tag exists on Docker Hub
-#   scripts/release.sh --check v0.3.0     # verify a specific tag
+#   scripts/release.sh --check v0.4.0     # verify a specific tag
 #
 # What it does (publish mode):
-#   1. Docker-pull all 4 images at the requested version from Docker Hub
+#   1. Docker-pull all 3 images at the requested version from Docker Hub
 #      (so the script is fully self-contained — no need to run the
 #      upstream build first).
 #   2. Re-tag each as :latest and push both tags.
@@ -55,10 +55,10 @@ require_cmd() {
 }
 
 # Detect the version to tag. Order of preference:
-#   1. explicit argument (e.g. scripts/release.sh v0.3.0)
+#   1. explicit argument (e.g. scripts/release.sh v0.4.0)
 #   2. SMARTOLT_IMAGE_TAG env var
 #   3. tag parsed from SMARTOLT_IMAGE in .env (the wizard writes this)
-#   4. DEFAULT_IMAGE_TAG_DEFAULT from scripts/install.sh
+#   4. DEFAULT_IMAGE_TAG from smartolt.sh
 get_version() {
   if [[ -n "${1:-}" ]]; then
     echo "$1"
@@ -76,20 +76,19 @@ get_version() {
       return
     fi
   fi
-  if [[ -f scripts/install.sh ]]; then
-    grep -oE 'DEFAULT_IMAGE_TAG_DEFAULT="[^"]+"' scripts/install.sh \
-      | head -1 | sed -E 's/.*"([^"]+)".*/\1/'
+  if [[ -f smartolt.sh ]]; then
+    grep -oE 'DEFAULT_IMAGE_TAG="\$\{SMARTOLT_IMAGE_TAG:-v[0-9]+\.[0-9]+\.[0-9]+\}"' smartolt.sh \
+      | head -1 | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+'
     return
   fi
-  die "Could not detect a version. Pass it as the first argument: scripts/release.sh v0.3.0"
+  die "Could not detect a version. Pass it as the first argument: scripts/release.sh v0.4.0"
 }
 
 # Image-name resolution. Maps the env var in .env to the repo basename.
 declare -A IMAGE_BASENAME=(
   [SMARTOLT_IMAGE]="smartolt-automate"
   [SMARTOLT_FRONTEND_IMAGE]="smartolt-automate-frontend"
-  [PROXY_IMAGE]="smartolt-automate-proxy"
-  [CERTBOT_IMAGE]="smartolt-automate-certbot"
+  [PROXY_IMAGE]="smartolt-automate-traefik"
 )
 
 # docker pull a single image from Docker Hub. Refuses to publish if it
@@ -209,7 +208,7 @@ if [[ "$MODE" == "check" ]]; then
   printf "    %-12s %s\n" "image" "tag"
   echo "    ------------ ------"
   rc=0
-  for repo in smartolt-automate smartolt-automate-frontend smartolt-automate-proxy smartolt-automate-certbot; do
+  for repo in smartolt-automate smartolt-automate-frontend smartolt-automate-traefik; do
     if verify_remote_tag "$repo" "$VERSION"; then
       printf "    %-12s %s  ✓\n" "$repo" "$VERSION"
     else
@@ -220,13 +219,13 @@ if [[ "$MODE" == "check" ]]; then
   exit $rc
 fi
 
-# ─── 1. Pull the 4 images at :VERSION (publish mode only) ──────────────────
+# ─── 1. Pull the 3 images at :VERSION (publish mode only) ──────────────────
 # We always pull :VERSION. The :latest tag is overwritten in step 3
 # regardless of what we have locally.
 if [[ $SKIP_PULL -eq 0 ]]; then
-  step "1/3  Pulling 4 images at :$VERSION from Docker Hub"
+  step "1/3  Pulling 3 images at :$VERSION from Docker Hub"
   pull_fail=0
-  for repo in smartolt-automate smartolt-automate-frontend smartolt-automate-proxy smartolt-automate-certbot; do
+  for repo in smartolt-automate smartolt-automate-frontend smartolt-automate-traefik; do
     src="${NAMESPACE}/${repo}:${VERSION}"
     if ! pull_image "$src"; then
       pull_fail=$((pull_fail + 1))
@@ -240,11 +239,11 @@ else
 fi
 
 # ─── 2. Tag and push :VERSION and :latest ───────────────────────────────────
-step "2/3  Tagging and pushing 4 images"
+step "2/3  Tagging and pushing 3 images"
 fail=0
-# Order matters: backend first, then frontend, then proxy, then certbot.
+# Order matters: backend first, then frontend, then proxy.
 # If something fails the remaining steps still run.
-declare -a ORDER=(SMARTOLT_IMAGE SMARTOLT_FRONTEND_IMAGE PROXY_IMAGE CERTBOT_IMAGE)
+declare -a ORDER=(SMARTOLT_IMAGE SMARTOLT_FRONTEND_IMAGE PROXY_IMAGE)
 for var in "${ORDER[@]}"; do
   repo="${IMAGE_BASENAME[$var]}"
   src="${NAMESPACE}/${repo}:${VERSION}"
@@ -267,7 +266,7 @@ fi
 # ─── 3. Verify the tags are live on Docker Hub ──────────────────────────────
 step "3/3  Verification"
 rc=0
-for repo in smartolt-automate smartolt-automate-frontend smartolt-automate-proxy smartolt-automate-certbot; do
+for repo in smartolt-automate smartolt-automate-frontend smartolt-automate-traefik; do
   if verify_remote_tag "$repo" "$VERSION"; then
     ok "$repo:$VERSION"
   else
