@@ -108,19 +108,16 @@ services:
     pull_policy: ${PULL_POLICY:-always}
     container_name: smartolt-automate-frontend
     restart: unless-stopped
-    # Host port mapping. Controlled by EXPOSE_FRONTEND_DIRECTLY:
-    #   true  → bound on all interfaces (0.0.0.0); reachable directly
-    #           via http://HOST:8080/ for LAN/test installs.
-    #   false → bound to 127.0.0.1 only; only Traefik can reach it
-    #           via the compose network. Use this for production
-    #           deployments where the operator wants Traefik to be the
-    #           only public entry point.
-    ports:
-      - mode: ingress
-        target: 80
-        published: "${FRONTEND_PORT:-8080}"
-        protocol: tcp
-        host_ip: "${FRONTEND_BIND_IP:-0.0.0.0}"
+    # No host port mapping: the frontend is only reachable via the
+    # compose network (e.g. an external reverse proxy on the host
+    # that points at http://smartolt-automate-frontend:80). The
+    # EXPOSE_FRONTEND_DIRECTLY setting in .env (and the
+    # FRONTEND_PORT / FRONTEND_BIND_IP vars) are ignored in this
+    # mode. Use the profile `https-behind-external-proxy` (or a
+    # manual `docker-compose.override.yml` with `ports:`) if you
+    # need a different exposure.
+    expose:
+      - "80"
     depends_on:
       web:
         condition: service_healthy
