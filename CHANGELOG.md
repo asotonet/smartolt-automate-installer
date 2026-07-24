@@ -18,8 +18,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (`KEY=example value`). Exit code 1; no docker compose is invoked.
 - **Deploy profiles**: `SMARTOLT_DEPLOY_PROFILE` selects one of four
   named bundles (frontend exposure + Traefik presence + HTTPS source):
-  - `lan` (default) — frontend on `:8080` LAN, Traefik runs but does
-    NOT route (self-signed on `:443`).
+  - `lan` (default) — frontend on `:8080` LAN, **no Traefik**, no
+    HTTPS. The operator serves the UI over plain HTTP. (Earlier
+    drafts of this profile had Traefik running with a self-signed
+    cert, but the cost (image pull, ports, RAM, browser warnings)
+    outweighed the benefit on an HTTP-only LAN install, so Traefik
+    was dropped.)
   - `https-public` — frontend loopback, Traefik routes with a LE cert.
   - `https-behind-external-proxy` — frontend loopback, NO Traefik
     container; for Cloudflare Tunnel / Caddy / nginx in front of
