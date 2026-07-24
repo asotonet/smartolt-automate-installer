@@ -43,7 +43,7 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 15s
+      start_period: 30s
 
   web:
     image: ${SMARTOLT_IMAGE:-asoton/smartolt-automate:v0.4.9}
