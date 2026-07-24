@@ -35,7 +35,7 @@ The single knob is `SMARTOLT_DEPLOY_PROFILE` in `.env`. It controls three things
 
 | Profile | Frontend on host | Traefik | HTTPS | Use when |
 |---|---|---|---|---|
-| `lan` (default) | `:8080` on `0.0.0.0` | runs but doesn't route | self-signed `:443` | LAN testing |
+| `lan` (default) | `:8080` on `0.0.0.0` | **doesn't run** | none | LAN testing, no HTTPS |
 | `https-public` | loopback `:8080` | runs, routes by labels | Let's Encrypt via ACME HTTP-01 | Production with a public domain |
 | `https-behind-external-proxy` | loopback `:8080` | **doesn't run** | handled by your external proxy | Cloudflare Tunnel / Caddy / nginx in front of the host |
 | `frontend-only` | `:8080` on `0.0.0.0` | **doesn't run** | none | Lowest footprint; LAN only, no HTTPS |

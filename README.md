@@ -35,7 +35,7 @@ La única perilla es `SMARTOLT_DEPLOY_PROFILE` en `.env`. Controla tres cosas: c
 
 | Profile | Frontend en host | Traefik | HTTPS | Cuándo usarlo |
 |---|---|---|---|---|
-| `lan` (default) | `:8080` en `0.0.0.0` | corre pero no enruta | self-signed `:443` | Testing en LAN |
+| `lan` (default) | `:8080` en `0.0.0.0` | **no corre** | ninguno | Testing en LAN, sin HTTPS |
 | `https-public` | loopback `:8080` | corre, enruta por labels | Let's Encrypt vía ACME HTTP-01 | Producción con dominio público |
 | `https-behind-external-proxy` | loopback `:8080` | **no corre** | manejado por tu proxy externo | Cloudflare Tunnel / Caddy / nginx delante del host |
 | `frontend-only` | `:8080` en `0.0.0.0` | **no corre** | ninguno | Mínimo footprint; LAN only, sin HTTPS |

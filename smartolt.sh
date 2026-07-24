@@ -229,7 +229,10 @@ _apply_profile() {
     lan)
       EXPOSE_FRONTEND_DIRECTLY="true"
       FRONTEND_BIND_IP="0.0.0.0"
-      TRAEFIK_ENABLE="false"   # Traefik runs but doesn't route
+      # Traefik is NOT started under this profile (see
+      # _profile_needs_traefik). LAN testing has no use for
+      # HTTPS — the operator serves the UI in plain HTTP on :8080.
+      TRAEFIK_ENABLE="false"
       ;;
     https-public)
       EXPOSE_FRONTEND_DIRECTLY="false"
@@ -272,9 +275,18 @@ _init_profile() {
 
 # Whether the active profile needs the Traefik service to start.
 # Returns 0 if yes, 1 if no (caller can use this in shell conditionals).
+#
+# Only https-public needs Traefik:
+#   - lan:                    Traefik adds noise — no PUBLIC_DOMAIN so
+#                             Traefik would serve a self-signed cert on :443
+#                             that browsers reject. Drop it.
+#   - https-public:           Traefik is the load balancer + LE issuer.
+#   - https-behind-external-proxy: another proxy is in front of the
+#                             host; running Traefik here would just shadow it.
+#   - frontend-only:          no HTTPS at all, no proxy needed.
 _profile_needs_traefik() {
   case "${REPLY_PROFILE:-lan}" in
-    lan|https-public) return 0 ;;
+    https-public) return 0 ;;
     *) return 1 ;;
   esac
 }
