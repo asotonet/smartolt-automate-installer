@@ -108,14 +108,13 @@ services:
     pull_policy: ${PULL_POLICY:-always}
     container_name: smartolt-automate-frontend
     restart: unless-stopped
-    # No host port mapping: the frontend is only reachable via the
-    # compose network (e.g. an external reverse proxy on the host
-    # that points at http://smartolt-automate-frontend:80). The
-    # EXPOSE_FRONTEND_DIRECTLY setting in .env (and the
-    # FRONTEND_PORT / FRONTEND_BIND_IP vars) are ignored in this
-    # mode. Use the profile `https-behind-external-proxy` (or a
-    # manual `docker-compose.override.yml` with `ports:`) if you
-    # need a different exposure.
+    # No host port mapping in the base compose. The frontend is always
+    # reachable on :80 inside the compose network (expose below).
+    # The installer script writes a per-deploy override file that
+    # adds the host port binding when the active profile is
+    # lan or frontend-only. https-public / https-behind-external-
+    # proxy keep the frontend compose-network-only: Traefik or the
+    # external proxy consumes it through the compose network.
     expose:
       - "80"
     depends_on:

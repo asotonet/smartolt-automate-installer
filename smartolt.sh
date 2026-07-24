@@ -480,6 +480,16 @@ _PROFILE_REQUIRED_VARS=(
 # Reads a single key from .env (returns empty string if missing/blank).
 _env_value() {
   local key="$1"
+  # Read from the live shell environment first. The loader at the
+  # top of the script snapshots and restores shell exports on top of
+  # the .env source, so any var the operator set in the shell
+  # (SMARTOLT_PUBLIC_DOMAIN=panel.example.com ./smartolt.sh deploy)
+  # wins here even if .env has an empty or stale value for the same
+  # key.
+  if [[ -n "${!key+x}" && -n "${!key}" ]]; then
+    printf '%s' "${!key}"
+    return 0
+  fi
   [[ -f .env ]] || return 0
   local v
   v="$(grep -E "^${key}=" .env | head -1 | cut -d= -f2- | sed -E 's/^"(.*)"$/\1/')"
@@ -967,6 +977,44 @@ cmd_deploy() {
   else
     ok "Profile '$REPLY_PROFILE' skips Traefik — the container will not start."
   fi
+
+  # Frontend host-binding policy by profile:
+  #   - lan / frontend-only: bind the frontend to the host on
+  #     $FRONTEND_PORT (default 8080) on $FRONTEND_BIND_IP (default
+  #     0.0.0.0). The operator reaches the UI at
+  #     http://HOST:FRONTEND_PORT/ directly.
+  #   - https-public: the frontend is reached via the Traefik
+  #     container on :443; no host binding here.
+  #   - https-behind-external-proxy: the operator's external proxy
+  #     reaches the frontend via the compose network
+  #     (http://smartolt-automate-frontend:80); no host binding
+  #     here either.
+  # The base compose has the frontend always reachable on :80
+  # inside the compose network (expose: 80). Compose v2's per-port
+  # profiles: filter doesn't exist on stable releases, so we use a
+  # tiny docker-compose.override.yml that the script writes and
+  # removes around the up.
+  local OVERRIDE_FILE="docker-compose.override.yml"
+  case "${REPLY_PROFILE:-lan}" in
+    lan|frontend-only)
+      cat > "$OVERRIDE_FILE" <<EOF
+services:
+  frontend:
+    ports:
+      - mode: ingress
+        target: 80
+        published: "\${FRONTEND_PORT:-8080}"
+        protocol: tcp
+        host_ip: "\${FRONTEND_BIND_IP:-0.0.0.0}"
+EOF
+      ok "Frontend host binding enabled (\$FRONTEND_PORT, profile '$REPLY_PROFILE')."
+      ;;
+    *)
+      rm -f "$OVERRIDE_FILE"
+      ok "Frontend stays compose-network-only (profile '$REPLY_PROFILE')."
+      ;;
+  esac
+
   # Compose with `profiles:` does NOT remove containers that were
   # started under a different profile — they become orphans. If a
   # Traefik container exists from a previous profile and the new
@@ -978,7 +1026,16 @@ cmd_deploy() {
     warn "Traefik container exists from a previous profile; removing it before up."
     docker compose --project-name "$COMPOSE_PROJECT_NAME" --profile traefik down --remove-orphans 2>&1 | tail -3
   fi
+  # If we just switched to a profile that needs the frontend bound
+  # to the host, a previous deploy's frontend container is up but
+  # without the host port. Recreate it so docker compose applies
+  # the new port mapping.
+  if [[ -f "$OVERRIDE_FILE" ]] \
+     && [[ -n "$(docker ps -a --format '{{.Names}}' 2>/dev/null | grep -x smartolt-automate-frontend)" ]]; then
+    docker compose --project-name "$COMPOSE_PROJECT_NAME" "${COMPOSE_PROFILES_ARGS[@]}" up -d --force-recreate --no-deps frontend 2>&1 | tail -3
+  fi
   docker compose --project-name "$COMPOSE_PROJECT_NAME" "${COMPOSE_PROFILES_ARGS[@]}" up -d "$@"
+  rm -f "$OVERRIDE_FILE"
   ok "Stack is up"
 }
 
