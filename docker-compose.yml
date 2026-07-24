@@ -173,9 +173,11 @@ services:
       - "${TRAEFIK_DASHBOARD_PORT:-8081}:8081"
     healthcheck:
       # Traefik 3.x doesn't expose a /ping endpoint. Check that the
-      # process is alive and the entrypoint is listening by hitting
-      # the redirect port (web plain HTTP entrypoint).
-      test: ["CMD-SHELL", "wget -qO- --spider http://127.0.0.1:80/ >/dev/null 2>&1 || exit 1"]
+      # process is alive by hitting the plain-HTTP entrypoint and
+      # following its redirect to the HTTPS entrypoint. --no-check-cert
+      # accepts the default self-signed cert until Traefik issues a
+      # real Let's Encrypt cert (HTTP-01 ACME flow).
+      test: ["CMD-SHELL", "wget -qO- --spider --max-redirect=5 --no-check-certificate http://127.0.0.1:80/ >/dev/null 2>&1 || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
